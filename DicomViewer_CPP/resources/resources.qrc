@@ -1,0 +1,32 @@
+<RCC>
+    <qresource prefix="/">
+        <!-- Toolbar Icons -->
+        <file>icons/OpenFolder_96.png</file>
+        <file>icons/ZoomIn_96.png</file>
+        <file>icons/ZoomOut_96.png</file>
+        <file>icons/ZoomFit_96.png</file>
+        <file>icons/previous-frame_96.png</file>
+        <file>icons/Play_96.png</file>
+        <file>icons/Pause_96.png</file>
+        <file>icons/next-frame_96.png</file>
+        <file>icons/HorizontalFlip_96.png</file>
+        <file>icons/VerticalFlip_96.png</file>
+        <file>icons/Invert_96.png</file>
+        <file>icons/InvertNew.png</file>
+        <file>icons/WWL_96.png</file>
+        <file>icons/WWL_Enabled_96.png</file>
+        <file>icons/ResetSettings_96.png</file>
+        <file>icons/ImageSave_96.png</file>
+        <file>icons/RunSave_96.png</file>
+        <file>icons/Info_96.png</file>
+        <file>icons/Close_96.png</file>
+        
+        <!-- Tree Widget Icons -->
+        <file>icons/Doctor.png</file>
+        <file>icons/List.png</file>
+        <file>icons/GeneralList.png</file>
+        <file>icons/Camera.png</file>
+        <file>icons/Loading.png</file>
+        <file>icons/AcquisitionHeader.png</file>
+    </qresource>
+</RCC>

@@ -1,0 +1,4 @@
+[AutoRun]
+open=DicomViewerSplash.exe
+icon=EikonDicomViewer.exe,0
+label=Eikon DICOM Viewer

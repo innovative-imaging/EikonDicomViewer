@@ -1,0 +1,4 @@
+#include "resource.h"
+
+// Embed the splash screen image as a resource
+101 RCDATA "CompanySplashScreen.png"
