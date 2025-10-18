@@ -1,0 +1,17 @@
+﻿################################################################################
+# This .gitignore file was automatically created by Microsoft(R) Visual Studio.
+################################################################################
+
+/.vs/EikonDicomViewer/FileContentIndex
+/.vs/EikonDicomViewer/v17
+/Binaries
+/dicomviewerSplashUI_CPP/.vs/DicomViewerSplash/FileContentIndex
+/dicomviewerSplashUI_CPP/.vs/DicomViewerSplash/v17
+/.vs
+/dicomviewerSplashUI_CPP/bin
+/dicomviewerSplashUI_CPP/build
+/dicomviewerSplashUI_CPP/DicomVie.12345678/x64/Release
+/DicomViewer_CPP/.vscode
+/DicomViewer_CPP/build
+*.md
+/DicomViewer_CPP/out/build/x64-Debug
