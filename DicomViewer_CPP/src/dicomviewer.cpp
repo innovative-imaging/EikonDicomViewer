@@ -271,6 +271,9 @@ DicomViewer::DicomViewer(QWidget *parent)
     , m_hasPositionerAngles(false)
     , m_hasTechnicalParams(false)
     , m_dicomReader(nullptr)
+    , m_dicomInfoVisible(false)
+    , m_dicomInfoWidget(nullptr)
+    , m_dicomInfoTextEdit(nullptr)
 {
     // Remove title bar and make frameless
     setWindowFlags(Qt::FramelessWindowHint);
@@ -406,7 +409,8 @@ DicomViewer::DicomViewer(QWidget *parent)
     connect(m_dicomTree, &QTreeWidget::currentItemChanged, 
             this, &DicomViewer::onTreeItemSelected);
     
-    // Skip event filter for now: m_dicomTree->installEventFilter(this);
+    // Event filter will be installed after UI is fully initialized
+    // m_dicomTree->installEventFilter(this);
     
     if (sidebarLayout && m_dicomTree) {
         sidebarLayout->addWidget(m_dicomTree);
@@ -482,8 +486,14 @@ DicomViewer::DicomViewer(QWidget *parent)
     // Step 4: Add overlay labels
     createOverlayLabels(m_imageWidget);
     
-    // Step 5: Auto-load DICOMDIR if present in executable directory
+    // Step 5: Create DICOM info panel
+    createDicomInfoPanel();
+    
+    // Step 6: Auto-load DICOMDIR if present in executable directory
     autoLoadDicomdir();
+    
+    // Step 7: Install event filters after full initialization
+    installEventFilters();
 }
 
 DicomViewer::~DicomViewer()
@@ -507,6 +517,21 @@ DicomViewer::~DicomViewer()
     // Clean up JPEG decompression codecs
     DJDecoderRegistration::cleanup();
 #endif
+}
+
+void DicomViewer::installEventFilters()
+{
+    // Install event filters safely after full UI initialization
+    if (m_dicomTree) {
+        m_dicomTree->installEventFilter(this);
+    }
+    
+    if (m_graphicsView) {
+        m_graphicsView->installEventFilter(this);
+        if (m_graphicsView->viewport()) {
+            m_graphicsView->viewport()->installEventFilter(this);
+        }
+    }
 }
 
 void DicomViewer::createToolbars()
@@ -565,7 +590,7 @@ void DicomViewer::createToolbars()
         {"ImageSave_96.png", "Save Image", "Save Image", &DicomViewer::saveImage},
         {"RunSave_96.png", "Save Run", "Save Run", &DicomViewer::saveRun},
         {"", "", "", nullptr}, // Separator
-        {"Info_96.png", "Info", "Info", nullptr},
+        {"Info_96.png", "Info", "Toggle DICOM Info", &DicomViewer::toggleDicomInfo},
     };
     
     for (const auto& action : actions) {
@@ -852,6 +877,15 @@ void DicomViewer::resizeEvent(QResizeEvent *event)
         m_closeButton->move(width() - 74, 10);
         m_closeButton->raise();
     }
+    
+    // Update DICOM info panel position if visible
+    if (m_dicomInfoWidget && m_dicomInfoVisible) {
+        const int panelWidth = 400;
+        const int panelHeight = height() - 100;
+        m_dicomInfoWidget->setFixedSize(panelWidth, panelHeight);
+        m_dicomInfoWidget->move(width() - panelWidth - 20, 60);
+        m_dicomInfoWidget->raise();
+    }
 }
 
 void DicomViewer::updateOverlayPositions()
@@ -914,10 +948,10 @@ void DicomViewer::nextFrame()
     if (wasPlaying && m_allFramesCached) {
         if (m_playbackTimer) {
             m_playbackTimer->start();
-        }
+    }
         m_isPlaying = true;
         updatePlayButtonIcon("Pause_96.png");
-    }
+}
 }
 
 void DicomViewer::automaticNextFrame()
@@ -987,17 +1021,17 @@ void DicomViewer::previousFrame()
         displayCachedFrame(prevFrame);
     } else {
         // If frames are still loading, only go back if the frame is cached
-        if (m_frameCache.contains(prevFrame)) {
-            displayCachedFrame(prevFrame);
+    if (m_frameCache.contains(prevFrame)) {
+        displayCachedFrame(prevFrame);
         } else {
             // Go forward to next frame if previous isn't ready
             int nextFrame = (m_currentFrame + 1) % m_totalFrames;
             if (m_frameCache.contains(nextFrame)) {
                 displayCachedFrame(nextFrame);
-            }
-        }
     }
-    
+}
+    }
+
 }
 
 void DicomViewer::togglePlayback()
@@ -1133,10 +1167,25 @@ void DicomViewer::invertImage()
 
 void DicomViewer::resetTransformations()
 {
+    // Reset all transformations but preserve original window/level values
     m_imagePipeline->resetAllTransformations();
+    
+    // Restore original window/level values instead of using hardcoded defaults
+    if (m_originalWindowWidth > 0) {
+        m_imagePipeline->setWindowLevel(m_originalWindowCenter, m_originalWindowWidth);
+        m_imagePipeline->setWindowLevelEnabled(true);
+        
+        // Update current values to reflect the reset
+        m_currentWindowCenter = m_originalWindowCenter;
+        m_currentWindowWidth = m_originalWindowWidth;
+    }
+    
     m_zoomFactor = 1.0;
     processThroughPipeline();
     fitToWindow();
+    
+    // Update overlay text to show new window/level values
+    updateOverlayInfo();
 }
 
 void DicomViewer::setWindowLevelPreset(const QString& presetName)
@@ -1319,6 +1368,10 @@ void DicomViewer::onTreeItemSelected(QTreeWidgetItem *current, QTreeWidgetItem *
 
 bool DicomViewer::eventFilter(QObject *obj, QEvent *event)
 {
+    // Safety check: ensure event and obj are valid
+    if (!obj || !event) {
+        return QMainWindow::eventFilter(obj, event);
+    }
 
     // Handle mouse events for zoom and windowing
     if (obj == m_graphicsView || obj == m_graphicsView->viewport()) {
@@ -1367,17 +1420,20 @@ bool DicomViewer::eventFilter(QObject *obj, QEvent *event)
     // These should only be used for frame navigation, not tree navigation
     if (obj == m_dicomTree && event->type() == QEvent::KeyPress) {
         QKeyEvent* keyEvent = static_cast<QKeyEvent*>(event);
-        if (keyEvent->key() == Qt::Key_Left || keyEvent->key() == Qt::Key_Right) {
-            // Handle frame navigation directly since tree widget has focus
-            if (m_totalFrames > 1) {
-                if (keyEvent->key() == Qt::Key_Left) {
-                    onPreviousFrameRequested();
-                } else {
-                    onNextFrameRequested();
+        if (keyEvent && (keyEvent->key() == Qt::Key_Left || keyEvent->key() == Qt::Key_Right)) {
+            // SAFETY: Only process if viewer is fully initialized
+            if (m_frameProcessor && m_totalFrames > 1 && !m_currentImagePath.isEmpty()) {
+                try {
+                    if (keyEvent->key() == Qt::Key_Left) {
+                        onPreviousFrameRequested();
+                    } else {
+                        onNextFrameRequested();
+                    }
+                } catch (...) {
+                    // Catch any exceptions during frame navigation
                 }
-            } else {
             }
-            // Block the event from affecting the tree widget
+            // ALWAYS block the event from affecting the tree widget
             return true;
         }
     }
@@ -1582,6 +1638,16 @@ void DicomViewer::updateOverlayInfo()
     m_overlayTopRight->setText(topRightText);
     m_overlayBottomLeft->setText(bottomLeftText);
     m_overlayBottomRight->setText(bottomRightText);
+    
+    // Update DICOM info panel if visible and we have a current image
+    if (m_dicomInfoVisible && !m_currentImagePath.isEmpty()) {
+        populateDicomInfo(m_currentImagePath);
+    }
+    
+    // Update DICOM info panel if it's visible
+    if (m_dicomInfoVisible && !m_currentImagePath.isEmpty()) {
+        populateDicomInfo(m_currentImagePath);
+    }
 }
 
 void DicomViewer::positionOverlays()
@@ -1777,8 +1843,22 @@ void DicomViewer::endWindowing()
 
 void DicomViewer::resetWindowLevel()
 {
-    m_imagePipeline->setWindowLevelEnabled(false);
+    // Reset window/level to original DICOM values instead of disabling
+    if (m_originalWindowWidth > 0) {
+        m_imagePipeline->setWindowLevel(m_originalWindowCenter, m_originalWindowWidth);
+        m_imagePipeline->setWindowLevelEnabled(true);
+        
+        // Update current values to reflect the reset
+        m_currentWindowCenter = m_originalWindowCenter;
+        m_currentWindowWidth = m_originalWindowWidth;
+    } else {
+        // Fallback: disable window/level if no original values available
+        m_imagePipeline->setWindowLevelEnabled(false);
+    }
     processThroughPipeline();
+    
+    // Update overlay text to show new window/level values
+    updateOverlayInfo();
 }
 
 void DicomViewer::toggleWindowLevelMode()
@@ -2837,10 +2917,12 @@ void DicomViewer::extractDicomMetadata(const QString& filePath)
             } else {
             }
         } else {
-            // Set default window/level using medical imaging ranges
-            // These work with original DICOM pixel values, not 8-bit display values
-            m_currentWindowCenter = 0.0;     // Center for general medical images
-            m_currentWindowWidth = 2000.0;   // Reasonable width for medical data
+            // Calculate window/level based on BitsStored when no DICOM values present
+            // Formula: WindowWidth = 2^BitsStored - 1, WindowCenter = WindowWidth / 2
+            // This utilizes the full dynamic range of the image data
+            double maxPixelValue = (1 << bitsStored) - 1;  // 2^BitsStored - 1
+            m_currentWindowWidth = maxPixelValue;
+            m_currentWindowCenter = maxPixelValue / 2.0;
             m_originalWindowCenter = m_currentWindowCenter;
             m_originalWindowWidth = m_currentWindowWidth;
             m_imagePipeline->setWindowLevel(m_currentWindowCenter, m_currentWindowWidth);
@@ -4089,4 +4171,356 @@ QString DicomViewer::formatFilterInfo(const QString& filterData, int indent)
     // In a full implementation, this would parse and format filter details
     QString indentStr = QString(" ").repeated(indent * 2);
     return indentStr + "Filter: " + filterData;
+}
+
+void DicomViewer::createDicomInfoPanel()
+{
+    // Create the DICOM info panel widget (initially hidden)
+    m_dicomInfoWidget = new QWidget(this);
+    m_dicomInfoWidget->setObjectName("dicom_info_panel");
+    
+    // Set up the layout
+    QVBoxLayout* layout = new QVBoxLayout(m_dicomInfoWidget);
+    layout->setContentsMargins(10, 10, 10, 10);
+    
+    // Create title bar with close button
+    QWidget* titleBar = new QWidget(m_dicomInfoWidget);
+    QHBoxLayout* titleLayout = new QHBoxLayout(titleBar);
+    titleLayout->setContentsMargins(5, 5, 5, 5);
+    
+    QLabel* titleLabel = new QLabel("DICOM Information", titleBar);
+    titleLabel->setStyleSheet(R"(
+        QLabel {
+            font-size: 16px;
+            font-weight: bold;
+            color: white;
+            padding: 0px;
+        }
+    )");
+    titleLayout->addWidget(titleLabel);
+    
+    // Add close button
+    QPushButton* closeBtn = new QPushButton("×", titleBar);
+    closeBtn->setFixedSize(24, 24);
+    closeBtn->setStyleSheet(R"(
+        QPushButton {
+            background-color: #606060;
+            border: 1px solid #808080;
+            color: white;
+            font-size: 16px;
+            font-weight: bold;
+            border-radius: 2px;
+        }
+        QPushButton:hover {
+            background-color: #707070;
+        }
+        QPushButton:pressed {
+            background-color: #505050;
+        }
+    )");
+    connect(closeBtn, &QPushButton::clicked, this, &DicomViewer::toggleDicomInfo);
+    titleLayout->addWidget(closeBtn);
+    
+    // Style the title bar
+    titleBar->setStyleSheet(R"(
+        QWidget {
+            background-color: #404040;
+            border: 1px solid #666666;
+        }
+    )");
+    
+    layout->addWidget(titleBar);
+    
+    // Create text edit for DICOM info
+    m_dicomInfoTextEdit = new QTextEdit(m_dicomInfoWidget);
+    m_dicomInfoTextEdit->setReadOnly(true);
+    m_dicomInfoTextEdit->setAcceptRichText(true); // Enable HTML rendering
+    m_dicomInfoTextEdit->setStyleSheet(R"(
+        QTextEdit {
+            background-color: #2b2b2b;
+            color: white;
+            border: 1px solid #666666;
+            padding: 2px;
+            selection-background-color: #0078d4;
+        }
+        QScrollBar:vertical {
+            background-color: #404040;
+            width: 16px;
+            border: none;
+            margin: 0;
+        }
+        QScrollBar::handle:vertical {
+            background-color: #606060;
+            border-radius: 8px;
+            min-height: 20px;
+        }
+        QScrollBar::handle:vertical:hover {
+            background-color: #707070;
+        }
+        QScrollBar::add-line:vertical,
+        QScrollBar::sub-line:vertical {
+            border: none;
+            background: none;
+        }
+        QScrollBar::up-arrow:vertical,
+        QScrollBar::down-arrow:vertical {
+            background: none;
+        }
+    )");
+    layout->addWidget(m_dicomInfoTextEdit);
+    
+    // Initially hide the panel
+    m_dicomInfoWidget->hide();
+    m_dicomInfoVisible = false;
+}
+
+void DicomViewer::toggleDicomInfo()
+{
+    if (!m_dicomInfoWidget) {
+        // If widget doesn't exist, create it now
+        createDicomInfoPanel();
+        if (!m_dicomInfoWidget) {
+            return; // Still failed to create
+        }
+    }
+    
+    m_dicomInfoVisible = !m_dicomInfoVisible;
+    
+    if (m_dicomInfoVisible) {
+        // Show the panel - position it on the right side of the screen
+        const QRect screenRect = geometry();
+        const int panelWidth = 400;
+        const int panelHeight = screenRect.height() - 120; // Leave some margin
+        
+        m_dicomInfoWidget->setFixedSize(panelWidth, panelHeight);
+        m_dicomInfoWidget->move(screenRect.width() - panelWidth - 20, 80); // Position from right edge with more top margin
+        
+        // Ensure widget is properly configured for display
+        m_dicomInfoWidget->setWindowFlags(Qt::Tool | Qt::WindowStaysOnTopHint);
+        m_dicomInfoWidget->setAttribute(Qt::WA_ShowWithoutActivating, false);
+        
+        // Populate with current image info if available
+        if (!m_currentImagePath.isEmpty()) {
+            populateDicomInfo(m_currentImagePath);
+        } else {
+            // Show default message if no image is loaded
+            if (m_dicomInfoTextEdit) {
+                m_dicomInfoTextEdit->setHtml("<h3>DICOM Information</h3><p>No image loaded. Please load a DICOM image to view its metadata.</p>");
+            }
+        }
+        
+        m_dicomInfoWidget->show();
+        m_dicomInfoWidget->raise(); // Bring to front
+        m_dicomInfoWidget->activateWindow(); // Ensure it gets focus
+    } else {
+        m_dicomInfoWidget->hide();
+    }
+}
+
+void DicomViewer::populateDicomInfo(const QString& filePath)
+{
+    if (!m_dicomInfoWidget || !m_dicomInfoTextEdit || filePath.isEmpty()) {
+        return;
+    }
+    
+#ifdef HAVE_DCMTK
+    try {
+        DcmFileFormat fileFormat;
+        OFCondition status = fileFormat.loadFile(filePath.toLocal8Bit().constData());
+        
+        if (status.bad()) {
+            m_dicomInfoTextEdit->setPlainText(QString("Error reading DICOM file: %1").arg(status.text()));
+            return;
+        }
+        
+        DcmDataset* dataset = fileFormat.getDataset();
+        if (!dataset) {
+            m_dicomInfoTextEdit->setPlainText("Error: No dataset found in DICOM file");
+            return;
+        }
+        
+        // Helper lambda to extract string value
+        auto getStringValue = [&](const DcmTagKey& tag) -> QString {
+            OFString ofString;
+            if (dataset->findAndGetOFString(tag, ofString).good()) {
+                QString result = QString::fromLatin1(ofString.c_str());
+                return result.replace("^", " ").trimmed();
+            }
+            return "N/A";
+        };
+        
+        // Helper lambda to extract numeric value
+        auto getNumericValue = [&](const DcmTagKey& tag) -> QString {
+            OFString ofString;
+            if (dataset->findAndGetOFString(tag, ofString).good()) {
+                return QString::fromLatin1(ofString.c_str()).trimmed();
+            }
+            return "N/A";
+        };
+        
+        // Helper lambda to create formatted row with alternating colors
+        auto formatRow = [](const QString& label, const QString& value, bool isEven) -> QString {
+            QString bgColor = isEven ? "#353535" : "#2b2b2b"; // Alternating row colors
+            return QString("<div style='background-color: %1; padding: 2px 4px; margin: 0;'>"
+                          "<span style='color: #cccccc; font-weight: bold;'>%2:</span> "
+                          "<span style='color: white;'>%3</span>"
+                          "</div>").arg(bgColor, label, value);
+        };
+        
+        // Helper lambda to create section header
+        auto formatSectionHeader = [](const QString& title) -> QString {
+            return QString("<div style='background-color: #505050; color: #ffffff; "
+                          "font-weight: bold; padding: 6px 4px; margin: 8px 0 2px 0; "
+                          "border-left: 4px solid #0078d4;'>%1</div>").arg(title);
+        };
+        
+        QString htmlContent = "<html><body style='margin: 0; padding: 0; font-family: Consolas, \"Courier New\", monospace; font-size: 11px;'>";
+        
+        // Patient Information
+        htmlContent += formatSectionHeader("PATIENT INFORMATION");
+        int rowCount = 0;
+        htmlContent += formatRow("Patient Name", getStringValue(DCM_PatientName), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Patient ID", getStringValue(DCM_PatientID), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Patient Sex", getStringValue(DCM_PatientSex), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Patient Age", getStringValue(DCM_PatientAge), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Patient Birth Date", getStringValue(DCM_PatientBirthDate), rowCount++ % 2 == 0);
+        
+        // Study Information
+        htmlContent += formatSectionHeader("STUDY INFORMATION");
+        rowCount = 0; // Reset for each section
+        htmlContent += formatRow("Study Description", getStringValue(DCM_StudyDescription), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Study Date", getStringValue(DCM_StudyDate), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Study Time", getStringValue(DCM_StudyTime), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Study ID", getStringValue(DCM_StudyID), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Accession Number", getStringValue(DCM_AccessionNumber), rowCount++ % 2 == 0);
+        
+        // Series Information
+        htmlContent += formatSectionHeader("SERIES INFORMATION");
+        rowCount = 0;
+        htmlContent += formatRow("Series Description", getStringValue(DCM_SeriesDescription), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Series Number", getNumericValue(DCM_SeriesNumber), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Series Date", getStringValue(DCM_SeriesDate), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Series Time", getStringValue(DCM_SeriesTime), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Modality", getStringValue(DCM_Modality), rowCount++ % 2 == 0);
+        
+        // Image Information
+        htmlContent += formatSectionHeader("IMAGE INFORMATION");
+        rowCount = 0;
+        htmlContent += formatRow("Instance Number", getNumericValue(DCM_InstanceNumber), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Acquisition Date", getStringValue(DCM_AcquisitionDate), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Acquisition Time", getStringValue(DCM_AcquisitionTime), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Content Date", getStringValue(DCM_ContentDate), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Content Time", getStringValue(DCM_ContentTime), rowCount++ % 2 == 0);
+        
+        // Image dimensions
+        Uint16 rows = 0, cols = 0, bitsAllocated = 0, bitsStored = 0;
+        dataset->findAndGetUint16(DCM_Rows, rows);
+        dataset->findAndGetUint16(DCM_Columns, cols);
+        dataset->findAndGetUint16(DCM_BitsAllocated, bitsAllocated);
+        dataset->findAndGetUint16(DCM_BitsStored, bitsStored);
+        
+        htmlContent += formatRow("Image Size", QString("%1 x %2").arg(cols).arg(rows), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Bits Allocated", QString::number(bitsAllocated), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Bits Stored", QString::number(bitsStored), rowCount++ % 2 == 0);
+        
+        // Equipment Information
+        htmlContent += formatSectionHeader("EQUIPMENT INFORMATION");
+        rowCount = 0;
+        htmlContent += formatRow("Institution Name", getStringValue(DCM_InstitutionName), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Manufacturer", getStringValue(DCM_Manufacturer), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Manufacturer Model", getStringValue(DCM_ManufacturerModelName), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Station Name", getStringValue(DCM_StationName), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Software Version", getStringValue(DCM_SoftwareVersions), rowCount++ % 2 == 0);
+        
+        // Technical Parameters (if available)
+        htmlContent += formatSectionHeader("TECHNICAL PARAMETERS");
+        rowCount = 0;
+        htmlContent += formatRow("KVP", getNumericValue(DCM_KVP), rowCount++ % 2 == 0);
+        htmlContent += formatRow("X-ray Tube Current", getNumericValue(DCM_XRayTubeCurrent) + " mA", rowCount++ % 2 == 0);
+        htmlContent += formatRow("Exposure Time", getNumericValue(DCM_ExposureTime) + " ms", rowCount++ % 2 == 0);
+        htmlContent += formatRow("Filter Material", getStringValue(DCM_FilterMaterial), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Primary Angle", getNumericValue(DCM_PositionerPrimaryAngle) + "°", rowCount++ % 2 == 0);
+        htmlContent += formatRow("Secondary Angle", getNumericValue(DCM_PositionerSecondaryAngle) + "°", rowCount++ % 2 == 0);
+        
+        // Window/Level Information
+        htmlContent += formatSectionHeader("WINDOW/LEVEL");
+        rowCount = 0;
+        htmlContent += formatRow("Window Center", getNumericValue(DCM_WindowCenter), rowCount++ % 2 == 0);
+        htmlContent += formatRow("Window Width", getNumericValue(DCM_WindowWidth), rowCount++ % 2 == 0);
+        
+        // Multi-frame information
+        Sint32 numberOfFrames = 0;
+        if (dataset->findAndGetSint32(DCM_NumberOfFrames, numberOfFrames).good() && numberOfFrames > 1) {
+            htmlContent += formatSectionHeader("MULTI-FRAME INFORMATION");
+            rowCount = 0;
+            htmlContent += formatRow("Number of Frames", QString::number(numberOfFrames), rowCount++ % 2 == 0);
+            htmlContent += formatRow("Current Frame", QString::number(m_currentFrame + 1), rowCount++ % 2 == 0);
+            
+            // Frame time if available
+            OFString frameTime;
+            if (dataset->findAndGetOFString(DCM_FrameTime, frameTime).good()) {
+                htmlContent += formatRow("Frame Time", QString::fromLatin1(frameTime.c_str()) + " ms", rowCount++ % 2 == 0);
+            }
+        }
+        
+        // SOP Class and Transfer Syntax
+        htmlContent += formatSectionHeader("DICOM TECHNICAL INFO");
+        rowCount = 0;
+        htmlContent += formatRow("SOP Class UID", getStringValue(DCM_SOPClassUID), rowCount++ % 2 == 0);
+        htmlContent += formatRow("SOP Instance UID", getStringValue(DCM_SOPInstanceUID), rowCount++ % 2 == 0);
+        
+        // Try to get transfer syntax from meta header
+        DcmMetaInfo* metaInfo = fileFormat.getMetaInfo();
+        if (metaInfo) {
+            OFString transferSyntax;
+            if (metaInfo->findAndGetOFString(DCM_TransferSyntaxUID, transferSyntax).good()) {
+                htmlContent += formatRow("Transfer Syntax", QString::fromLatin1(transferSyntax.c_str()), rowCount++ % 2 == 0);
+            }
+        }
+        
+        // Additional Clinical Information (if available)
+        QString additionalInfo;
+        OFString tempString;
+        
+        // Body Part Examined
+        if (dataset->findAndGetOFString(DCM_BodyPartExamined, tempString).good()) {
+            additionalInfo += formatRow("Body Part Examined", QString::fromLatin1(tempString.c_str()), rowCount++ % 2 == 0);
+        }
+        
+        // View Position
+        if (dataset->findAndGetOFString(DCM_ViewPosition, tempString).good()) {
+            additionalInfo += formatRow("View Position", QString::fromLatin1(tempString.c_str()), rowCount++ % 2 == 0);
+        }
+        
+        // Laterality
+        if (dataset->findAndGetOFString(DCM_Laterality, tempString).good()) {
+            additionalInfo += formatRow("Laterality", QString::fromLatin1(tempString.c_str()), rowCount++ % 2 == 0);
+        }
+        
+        // Protocol Name
+        if (dataset->findAndGetOFString(DCM_ProtocolName, tempString).good()) {
+            additionalInfo += formatRow("Protocol Name", QString::fromLatin1(tempString.c_str()), rowCount++ % 2 == 0);
+        }
+        
+        // Performing Physician
+        if (dataset->findAndGetOFString(DCM_PerformingPhysicianName, tempString).good()) {
+            additionalInfo += formatRow("Performing Physician", QString::fromLatin1(tempString.c_str()).replace("^", " "), rowCount++ % 2 == 0);
+        }
+        
+        // If we have additional clinical info, add it as a section
+        if (!additionalInfo.isEmpty()) {
+            htmlContent += formatSectionHeader("CLINICAL INFORMATION");
+            htmlContent += additionalInfo;
+        }
+        
+        htmlContent += "</body></html>";
+        
+        m_dicomInfoTextEdit->setHtml(htmlContent);
+        
+    } catch (...) {
+        m_dicomInfoTextEdit->setPlainText("Error: Exception occurred while reading DICOM file");
+    }
+#else
+    m_dicomInfoTextEdit->setPlainText("DICOM support not available (DCMTK not compiled)");
+#endif
 }

@@ -24,7 +24,6 @@ echo Configuring with CMake...
 cmake .. -DCMAKE_PREFIX_PATH="%CMAKE_PREFIX_PATH%"
 if %ERRORLEVEL% neq 0 (
     echo CMake configuration failed!
-    pause
     exit /b %ERRORLEVEL%
 )
 
@@ -41,7 +40,6 @@ REM Build Release
 cmake --build . --config Release --clean-first
 if %ERRORLEVEL% neq 0 (
     echo Release build failed!
-    pause
     exit /b %ERRORLEVEL%
 )
 
@@ -58,7 +56,6 @@ REM Build MinSizeRel
 cmake --build . --config MinSizeRel --clean-first
 if %ERRORLEVEL% neq 0 (
     echo MinSizeRel build failed!
-    pause
     exit /b %ERRORLEVEL%
 )
 
@@ -108,23 +105,4 @@ echo Release build:    build\Release\Release\EikonDicomViewer.exe
 echo MinSizeRel build: build\MinSizeRel\MinSizeRel\EikonDicomViewer.exe
 echo ============================================
 
-echo.
-echo Which build would you like to run?
-echo 1. Release (optimized for speed)
-echo 2. MinSizeRel (optimized for size)
-echo 3. None
-set /p choice="Enter choice (1-3): "
-
-if "%choice%"=="1" (
-    echo Running Release build...
-    cd Release\Release
-    start EikonDicomViewer.exe
-) else if "%choice%"=="2" (
-    echo Running MinSizeRel build...
-    cd MinSizeRel\MinSizeRel
-    start EikonDicomViewer.exe
-) else (
-    echo No application started.
-)
-
-pause
+REM Build script completed - no interactive prompts

@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <iomanip>
 #include "splash_image_data.h"
 
 #pragma comment(lib, "gdiplus.lib")
@@ -49,6 +50,10 @@ wstring g_logFile;
 bool g_isRunning = true;
 unique_ptr<Image> g_splashImage = nullptr;
 
+// Step timing tracking
+chrono::steady_clock::time_point g_stepStartTime;
+chrono::steady_clock::time_point g_pipelineStartTime;
+
 // GDI+ token
 ULONG_PTR g_gdiplusToken;
 
@@ -70,6 +75,14 @@ void ExecutePipeline();
 bool FileExists(const wstring& path);
 bool DirectoryExists(const wstring& path);
 wstring GetExecutableDirectory();
+
+// Helper functions for robust process management
+bool SafeCreateProcess(const wstring& command, PROCESS_INFORMATION& pi, bool waitForCompletion = false, DWORD timeoutMs = INFINITE);
+void SafeCloseProcessHandles(PROCESS_INFORMATION& pi);
+
+// Step timing functions
+void LogStepStart(const wstring& stepName);
+void LogStepEnd(const wstring& stepName, bool success = true);
 
 // Image loading functions
 bool LoadSplashImageFromResource();
@@ -117,8 +130,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         // Convert command line argument to wstring
         g_sourceDir = StringToWString(string(lpCmdLine));
         // Remove quotes if present
-        if (g_sourceDir.front() == L'"' && g_sourceDir.back() == L'"') {
+        if (!g_sourceDir.empty() && g_sourceDir.front() == L'"' && g_sourceDir.back() == L'"') {
             g_sourceDir = g_sourceDir.substr(1, g_sourceDir.length() - 2);
+        }
+        
+        // Validate manually specified directory
+        if (!HasDicomData(g_sourceDir)) {
+            MessageBox(NULL, 
+                (L"Invalid DICOM source directory specified:\n" + g_sourceDir + L"\n\n"
+                L"The specified directory does not contain required DICOM data.\n\n"
+                L"Please ensure the directory contains:\n"
+                L"• DICOMDIR file or DicomFiles folder\n"
+                L"• EikonDicomViewer.7z archive\n"
+                L"• 7za.exe extraction tool").c_str(),
+                L"Invalid Source Directory", MB_OK | MB_ICONERROR);
+            GdiplusShutdown(g_gdiplusToken);
+            return 1;
         }
     } else {
         // Auto-detect DVD/CD drive
@@ -130,10 +157,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 L"Please ensure:\n"
                 L"• DICOM DVD is inserted\n"
                 L"• Drive contains DICOMDIR or DicomFiles folder\n"
-                L"• EikonDicomViewer.exe is present\n\n"
+                L"• EikonDicomViewer.7z archive is present\n"
+                L"• 7za.exe extraction tool is present\n\n"
                 L"Alternatively, run with path argument:\n"
                 L"DicomViewerSplash.exe \"C:\\Path\\To\\DicomData\"",
                 L"No DICOM DVD detected", MB_OK | MB_ICONERROR);
+            GdiplusShutdown(g_gdiplusToken);
             return 1;
         }
     }
@@ -369,30 +398,65 @@ wstring GetExecutableDirectory() {
 }
 
 void LogMessage(const wstring& level, const wstring& message) {
-    wofstream logFile(g_logFile, ios::app);
-    if (logFile.is_open()) {
-        logFile << level << L" " << message << endl;
-        logFile.close();
+    try {
+        wofstream logFile(g_logFile, ios::app);
+        if (logFile.is_open()) {
+            // Add timestamp
+            auto now = chrono::system_clock::now();
+            auto time_t = chrono::system_clock::to_time_t(now);
+            auto ms = chrono::duration_cast<chrono::milliseconds>(now.time_since_epoch()) % 1000;
+            
+            wchar_t timestamp[64];
+            tm localTime;
+            localtime_s(&localTime, &time_t);
+            wcsftime(timestamp, sizeof(timestamp) / sizeof(wchar_t), L"%Y-%m-%d %H:%M:%S", &localTime);
+            
+            logFile << L"[" << timestamp << L"." << setfill(L'0') << setw(3) << ms.count() 
+                    << L"] " << level << L": " << message << endl;
+            logFile.close();
+        }
+    } catch (...) {
+        // Silently fail - don't let logging errors crash the app
     }
 }
 
 void UpdateStatus(const wstring& message) {
     if (g_hStatusLabel) {
         // Only update if different to prevent unnecessary redraws
-        wchar_t currentText[256];
-        GetWindowText(g_hStatusLabel, currentText, 256);
-        if (wcscmp(currentText, L"Loading DicomViewer...") != 0) {
-            SetWindowText(g_hStatusLabel, L"Loading DicomViewer...");
+        wchar_t currentText[256] = {};
+        GetWindowText(g_hStatusLabel, currentText, sizeof(currentText) / sizeof(wchar_t) - 1);
+        if (wcscmp(currentText, message.c_str()) != 0) {
+            SetWindowText(g_hStatusLabel, message.c_str());
+            InvalidateRect(g_hStatusLabel, NULL, TRUE);
+            UpdateWindow(g_hStatusLabel);
         }
     }
 }
 
 bool FileExists(const wstring& path) {
-    return fs::exists(path) && fs::is_regular_file(path);
+    if (path.empty()) return false;
+    try {
+        return fs::exists(path) && fs::is_regular_file(path);
+    } catch (const fs::filesystem_error& e) {
+        LogMessage(L"ERROR", L"FileExists check failed for " + path + L": " + StringToWString(e.what()));
+        return false;
+    } catch (...) {
+        LogMessage(L"ERROR", L"FileExists check failed for " + path + L": Unknown error");
+        return false;
+    }
 }
 
 bool DirectoryExists(const wstring& path) {
-    return fs::exists(path) && fs::is_directory(path);
+    if (path.empty()) return false;
+    try {
+        return fs::exists(path) && fs::is_directory(path);
+    } catch (const fs::filesystem_error& e) {
+        LogMessage(L"ERROR", L"DirectoryExists check failed for " + path + L": " + StringToWString(e.what()));
+        return false;
+    } catch (...) {
+        LogMessage(L"ERROR", L"DirectoryExists check failed for " + path + L": Unknown error");
+        return false;
+    }
 }
 
 bool CreateDestinationDirectory() {
@@ -408,11 +472,17 @@ bool CreateDestinationDirectory() {
             si.wShowWindow = SW_HIDE;
             
             wstring killCmd = L"taskkill /F /IM EikonDicomViewer.exe";
-            if (CreateProcess(NULL, const_cast<wchar_t*>(killCmd.c_str()), NULL, NULL, 
+            // Create a mutable copy for CreateProcess
+            vector<wchar_t> cmdBuffer(killCmd.begin(), killCmd.end());
+            cmdBuffer.push_back(L'\0');
+            
+            if (CreateProcess(NULL, cmdBuffer.data(), NULL, NULL, 
                              FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
                 WaitForSingleObject(pi.hProcess, 5000); // 5 second timeout
                 CloseHandle(pi.hProcess);
                 CloseHandle(pi.hThread);
+            } else {
+                LogMessage(L"WARNING", L"Failed to terminate existing EikonDicomViewer processes");
             }
             Sleep(1000);
             
@@ -470,6 +540,10 @@ bool StartRobocopy() {
     wstring robocopyCmd = L"robocopy \"" + sourceDir + L"\" \"" + destDir + 
                          L"\" /E /R:3 /W:1 /LOG+:\"" + g_logFile + L"\"";
     
+    // Create a mutable copy for CreateProcess
+    vector<wchar_t> cmdBuffer(robocopyCmd.begin(), robocopyCmd.end());
+    cmdBuffer.push_back(L'\0');
+    
     // Start robocopy in background
     STARTUPINFO si = { sizeof(si) };
     PROCESS_INFORMATION pi = {};
@@ -477,7 +551,7 @@ bool StartRobocopy() {
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
     
-    if (CreateProcess(NULL, const_cast<wchar_t*>(robocopyCmd.c_str()), NULL, NULL, 
+    if (CreateProcess(NULL, cmdBuffer.data(), NULL, NULL, 
                      FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
@@ -490,36 +564,39 @@ bool StartRobocopy() {
 }
 
 bool CopyFfmpegExe() {
-    LogMessage(L"INFO", L"Starting ffmpeg.exe copy");
-    UpdateStatus(L"Copying ffmpeg.exe");
+    LogMessage(L"INFO", L"Starting ffmpeg.exe copy with robocopy");
     
     wstring sourcePath = g_sourceDir + L"\\ffmpeg.exe";
-    wstring destPath = g_tempDir + L"\\ffmpeg.exe";
     
     if (!FileExists(sourcePath)) {
         LogMessage(L"WARNING", L"ffmpeg.exe not found at " + sourcePath);
         return false;
     }
     
-    // Build copy command to run in background
-    wstring copyCmd = L"copy /Y \"" + sourcePath + L"\" \"" + destPath + L"\"";
+    // Build robocopy command for single file copy
+    wstring robocopyCmd = L"robocopy \"" + g_sourceDir + L"\" \"" + g_tempDir + 
+                         L"\" ffmpeg.exe /R:3 /W:1 /LOG+:\"" + g_logFile + L"\"";
     
-    // Start copy in background
+    // Create a mutable copy for CreateProcess
+    vector<wchar_t> cmdBuffer(robocopyCmd.begin(), robocopyCmd.end());
+    cmdBuffer.push_back(L'\0');
+    
+    // Start robocopy in background
     STARTUPINFO si = { sizeof(si) };
     PROCESS_INFORMATION pi = {};
     
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
     
-    if (CreateProcess(NULL, const_cast<wchar_t*>(copyCmd.c_str()), NULL, NULL, 
+    if (CreateProcess(NULL, cmdBuffer.data(), NULL, NULL, 
                      FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
-        LogMessage(L"INFO", L"ffmpeg.exe copy started successfully");
+        LogMessage(L"INFO", L"ffmpeg.exe robocopy started successfully");
         return true;
     }
     
-    LogMessage(L"ERROR", L"Failed to start ffmpeg.exe copy");
+    LogMessage(L"ERROR", L"Failed to start ffmpeg.exe robocopy");
     return false;
 }
 
@@ -544,29 +621,54 @@ bool Extract7zArchive() {
     wstring extractCmd = L"\"" + sevenzaPath + L"\" x \"" + archivePath + 
                         L"\" -o\"" + g_tempDir + L"\" -y";
     
+    // Create a mutable copy for CreateProcess
+    vector<wchar_t> cmdBuffer(extractCmd.begin(), extractCmd.end());
+    cmdBuffer.push_back(L'\0');
+    
     STARTUPINFO si = { sizeof(si) };
     PROCESS_INFORMATION pi = {};
     
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
     
-    if (CreateProcess(NULL, const_cast<wchar_t*>(extractCmd.c_str()), NULL, NULL,
+    if (CreateProcess(NULL, cmdBuffer.data(), NULL, NULL,
                      FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
         
-        // Wait for extraction to complete
-        WaitForSingleObject(pi.hProcess, 30000); // 30 second timeout
+        LogMessage(L"INFO", L"7za.exe process started, waiting for completion...");
+        auto extractionStartTime = chrono::steady_clock::now();
         
-        DWORD exitCode;
-        GetExitCodeProcess(pi.hProcess, &exitCode);
+        // Wait for extraction to complete with longer timeout (2 minutes)
+        DWORD result = WaitForSingleObject(pi.hProcess, 120000); // 2 minute timeout
         
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
+        auto extractionEndTime = chrono::steady_clock::now();
+        auto extractionDuration = chrono::duration_cast<chrono::milliseconds>(extractionEndTime - extractionStartTime);
+        LogMessage(L"INFO", L"7za.exe process wait completed after " + to_wstring(extractionDuration.count()) + L"ms");
         
-        if (exitCode == 0) {
-            LogMessage(L"INFO", L"7z extraction completed successfully");
-            return true;
+        if (result == WAIT_OBJECT_0) {
+            // Process completed normally
+            DWORD exitCode;
+            GetExitCodeProcess(pi.hProcess, &exitCode);
+            
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            
+            if (exitCode == 0) {
+                LogMessage(L"INFO", L"7z extraction completed successfully");
+                return true;
+            } else {
+                LogMessage(L"ERROR", L"7z extraction failed with exit code: " + to_wstring(exitCode));
+            }
+        } else if (result == WAIT_TIMEOUT) {
+            // Process timed out
+            LogMessage(L"ERROR", L"7z extraction timed out after 2 minutes");
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
         } else {
-            LogMessage(L"ERROR", L"7z extraction failed with exit code: " + to_wstring(exitCode));
+            // Other error
+            LogMessage(L"ERROR", L"Error waiting for 7z extraction process");
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
         }
     }
     
@@ -634,7 +736,11 @@ bool LaunchViewer() {
     killSi.wShowWindow = SW_HIDE;
     
     wstring killCmd = L"taskkill /F /IM EikonDicomViewer.exe";
-    if (CreateProcess(NULL, const_cast<wchar_t*>(killCmd.c_str()), NULL, NULL, 
+    // Create a mutable copy for CreateProcess
+    vector<wchar_t> killCmdBuffer(killCmd.begin(), killCmd.end());
+    killCmdBuffer.push_back(L'\0');
+    
+    if (CreateProcess(NULL, killCmdBuffer.data(), NULL, NULL, 
                      FALSE, CREATE_NO_WINDOW, NULL, NULL, &killSi, &killPi)) {
         WaitForSingleObject(killPi.hProcess, 3000); // 3 second timeout
         CloseHandle(killPi.hProcess);
@@ -765,18 +871,36 @@ wstring DetectSourceDrive() {
 }
 
 bool HasDicomData(const wstring& drivePath) {
+    if (drivePath.empty()) return false;
+    
     try {
+        // Validate drive path exists and is accessible
+        if (!DirectoryExists(drivePath)) {
+            return false;
+        }
+        
         wstring dicomdirPath = drivePath + L"\\DICOMDIR";
         wstring dicomfilesPath = drivePath + L"\\DicomFiles";
-        wstring viewerPath = drivePath + L"\\" + VIEWER_EXE;
+        wstring archivePath = drivePath + L"\\EikonDicomViewer.7z";
+        wstring sevenzaPath = drivePath + L"\\" + SEVENZA_EXE;
         
-        // Must have either DICOMDIR or DicomFiles, and preferably the viewer
+        // Must have either DICOMDIR or DicomFiles
         bool hasDicom = FileExists(dicomdirPath) || DirectoryExists(dicomfilesPath);
-        bool hasViewer = FileExists(viewerPath);
         
-        return hasDicom && hasViewer;
+        // Must have the 7z archive and 7za.exe for extraction
+        bool hasArchive = FileExists(archivePath) && FileExists(sevenzaPath);
+        
+        LogMessage(L"DEBUG", L"Drive " + drivePath + L" - DICOM: " + (hasDicom ? L"Yes" : L"No") + 
+                            L", Archive: " + (hasArchive ? L"Yes" : L"No"));
+        
+        return hasDicom && hasArchive;
+    }
+    catch (const exception& e) {
+        LogMessage(L"ERROR", L"HasDicomData check failed for " + drivePath + L": " + StringToWString(e.what()));
+        return false;
     }
     catch (...) {
+        LogMessage(L"ERROR", L"HasDicomData check failed for " + drivePath + L": Unknown error");
         return false;
     }
 }
@@ -845,41 +969,164 @@ wstring GetExecutableDrive() {
     return L"";
 }
 
+// Helper functions for robust process management
+bool SafeCreateProcess(const wstring& command, PROCESS_INFORMATION& pi, bool waitForCompletion, DWORD timeoutMs) {
+    if (command.empty()) {
+        LogMessage(L"ERROR", L"SafeCreateProcess: Empty command provided");
+        return false;
+    }
+    
+    // Create a mutable copy for CreateProcess
+    vector<wchar_t> cmdBuffer(command.begin(), command.end());
+    cmdBuffer.push_back(L'\0');
+    
+    STARTUPINFO si = { sizeof(si) };
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    
+    ZeroMemory(&pi, sizeof(pi));
+    
+    if (!CreateProcess(NULL, cmdBuffer.data(), NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        DWORD error = GetLastError();
+        LogMessage(L"ERROR", L"CreateProcess failed for command: " + command + L" Error: " + to_wstring(error));
+        return false;
+    }
+    
+    if (waitForCompletion) {
+        DWORD result = WaitForSingleObject(pi.hProcess, timeoutMs);
+        if (result != WAIT_OBJECT_0) {
+            if (result == WAIT_TIMEOUT) {
+                LogMessage(L"ERROR", L"Process timed out: " + command);
+                TerminateProcess(pi.hProcess, 1);
+            } else {
+                LogMessage(L"ERROR", L"Error waiting for process: " + command);
+            }
+            SafeCloseProcessHandles(pi);
+            return false;
+        }
+        
+        DWORD exitCode;
+        if (GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode != 0) {
+            LogMessage(L"ERROR", L"Process exited with code " + to_wstring(exitCode) + L": " + command);
+            SafeCloseProcessHandles(pi);
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+void SafeCloseProcessHandles(PROCESS_INFORMATION& pi) {
+    if (pi.hProcess) {
+        CloseHandle(pi.hProcess);
+        pi.hProcess = NULL;
+    }
+    if (pi.hThread) {
+        CloseHandle(pi.hThread);
+        pi.hThread = NULL;
+    }
+}
+
+// Step timing functions for performance monitoring
+void LogStepStart(const wstring& stepName) {
+    g_stepStartTime = chrono::steady_clock::now();
+    LogMessage(L"STEP_START", stepName);
+}
+
+void LogStepEnd(const wstring& stepName, bool success) {
+    auto endTime = chrono::steady_clock::now();
+    auto duration = chrono::duration_cast<chrono::milliseconds>(endTime - g_stepStartTime);
+    
+    wstring status = success ? L"SUCCESS" : L"FAILED";
+    wstring durationStr = to_wstring(duration.count()) + L"ms";
+    
+    LogMessage(L"STEP_END", stepName + L" - " + status + L" (Duration: " + durationStr + L")");
+    
+    // Also log total elapsed time since pipeline start
+    if (g_pipelineStartTime.time_since_epoch().count() > 0) {
+        auto totalDuration = chrono::duration_cast<chrono::milliseconds>(endTime - g_pipelineStartTime);
+        LogMessage(L"PROGRESS", L"Total elapsed time: " + to_wstring(totalDuration.count()) + L"ms");
+    }
+}
+
 void ExecutePipeline() {
     Sleep(1000); // Initial delay to show splash screen
     
     try {
-        // Log the detected source directory
+        // Initialize pipeline timing
+        g_pipelineStartTime = chrono::steady_clock::now();
+        LogMessage(L"PIPELINE_START", L"DicomViewer pipeline execution started");
         LogMessage(L"INFO", L"Using source directory: " + g_sourceDir);
         
         // Step 1: Create destination directory
+        LogStepStart(L"Create Destination Directory");
         UpdateStatus(L"Preparing destination");
-        if (!CreateDestinationDirectory()) {
+        bool step1Success = CreateDestinationDirectory();
+        LogStepEnd(L"Create Destination Directory", step1Success);
+        
+        if (!step1Success) {
             MessageBox(g_hMainWnd, L"Failed to prepare destination directory", 
                       L"Error", MB_OK | MB_ICONERROR);
             return;
         }
         
-        // Step 2: Start robocopy for DicomFiles (background)
-        UpdateStatus(L"Starting file copy");
-        StartRobocopy();
-        
-        // Step 2b: Copy ffmpeg.exe (background)
-        CopyFfmpegExe();
-        
-        // Step 3: Copy DICOMDIR file
-        UpdateStatus(L"Copying DICOMDIR");
-        CopyDicomDir();
-        
-        // Step 4: Extract 7z archive
+        // Step 2: Extract 7z archive first (contains the viewer executable)
+        LogStepStart(L"7z Archive Extraction");
         UpdateStatus(L"Extracting files");
-        Extract7zArchive();
+        bool step2Success = Extract7zArchive();
+        LogStepEnd(L"7z Archive Extraction", step2Success);
         
-        // Step 5: Launch viewer
+        if (!step2Success) {
+            MessageBox(g_hMainWnd, L"Failed to extract DICOM Viewer files", 
+                      L"Error", MB_OK | MB_ICONERROR);
+            return;
+        }
+        
+        // Step 2b: Verify that the viewer executable was extracted
+        LogStepStart(L"Verify Viewer Executable");
+        wstring viewerPath = g_tempDir + L"\\" + VIEWER_EXE;
+        bool verificationSuccess = FileExists(viewerPath);
+        LogStepEnd(L"Verify Viewer Executable", verificationSuccess);
+        
+        if (!verificationSuccess) {
+            LogMessage(L"ERROR", L"Viewer executable not found after extraction: " + viewerPath);
+            MessageBox(g_hMainWnd, L"Extraction completed but DICOM Viewer executable not found.\nExtraction may have failed.", 
+                      L"Error", MB_OK | MB_ICONERROR);
+            return;
+        }
+        LogMessage(L"INFO", L"Viewer executable verified at: " + viewerPath);
+        
+        // Step 3: Launch viewer immediately after extraction
+        LogStepStart(L"Launch Viewer");
         UpdateStatus(L"Starting viewer");
-        if (LaunchViewer()) {
-            // Success! Kill the timeout timer and exit normally
+        bool step3Success = LaunchViewer();
+        LogStepEnd(L"Launch Viewer", step3Success);
+        
+        if (step3Success) {
+            // Success! Kill the timeout timer and start background operations
             KillTimer(g_hMainWnd, ID_TIMEOUT_TIMER);
+            
+            // Step 4: Copy DICOMDIR file
+            LogStepStart(L"Copy DICOMDIR File");
+            bool step4Success = CopyDicomDir();
+            LogStepEnd(L"Copy DICOMDIR File", step4Success);
+            
+            // Step 5: Start robocopy for DicomFiles (background)
+            LogStepStart(L"Start DicomFiles Copy");
+            bool step5Success = StartRobocopy();
+            LogStepEnd(L"Start DicomFiles Copy", step5Success);
+            
+            // Step 6: Copy ffmpeg.exe using robocopy (background)
+            LogStepStart(L"Start ffmpeg Copy");
+            bool step6Success = CopyFfmpegExe();
+            LogStepEnd(L"Start ffmpeg Copy", step6Success);
+            
+            // Log pipeline completion
+            auto pipelineEnd = chrono::steady_clock::now();
+            auto totalDuration = chrono::duration_cast<chrono::milliseconds>(pipelineEnd - g_pipelineStartTime);
+            LogMessage(L"PIPELINE_END", L"DicomViewer pipeline completed successfully in " + 
+                      to_wstring(totalDuration.count()) + L"ms");
+            
             Sleep(2000); // Brief pause to show success
             g_isRunning = false;
             PostMessage(g_hMainWnd, WM_DESTROY, 0, 0);

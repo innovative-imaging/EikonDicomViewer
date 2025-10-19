@@ -201,6 +201,7 @@ private:
     void createCloseButton();
     QWidget* createImageWidget();
     void createOverlayLabels(QWidget* parent);
+    void installEventFilters();
     
     // Display methods
     void updateOverlayPositions();
@@ -210,6 +211,11 @@ private:
     void updateZoomOverlay();
     void updateCursorMode();
     void updatePlayButtonIcon(const QString& iconFilename);
+    
+    // DICOM info panel methods
+    void toggleDicomInfo();
+    void createDicomInfoPanel();
+    void populateDicomInfo(const QString& filePath);
     
     // Progressive loading methods
     void displayCachedFrame(int frameIndex);
@@ -277,6 +283,11 @@ private:
     QLabel* m_overlayTopRight;
     QLabel* m_overlayBottomLeft;
     QLabel* m_overlayBottomRight;
+    
+    // DICOM info panel
+    bool m_dicomInfoVisible;
+    QWidget* m_dicomInfoWidget;
+    QTextEdit* m_dicomInfoTextEdit;
     
     // Professional framework components (simplified)
     DicomPlaybackController* m_playbackController;

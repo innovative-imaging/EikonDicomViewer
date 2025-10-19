@@ -24,7 +24,6 @@ echo Configuring with CMake...
 cmake .. -DCMAKE_PREFIX_PATH="%CMAKE_PREFIX_PATH%"
 if %ERRORLEVEL% neq 0 (
     echo CMake configuration failed!
-    pause
     exit /b %ERRORLEVEL%
 )
 
@@ -40,7 +39,6 @@ echo Building project with MinSizeRel configuration...
 cmake --build . --config MinSizeRel --clean-first
 if %ERRORLEVEL% neq 0 (
     echo Build failed!
-    pause
     exit /b %ERRORLEVEL%
 )
 
@@ -116,11 +114,4 @@ echo Splash executable: build\MinSizeRel\MinSizeRel\DicomViewerSplash.exe
 echo Note: ffmpeg.exe is separate and not included in archive
 echo ============================================
 
-REM Ask if user wants to run the application
-set /p choice="Do you want to run the MinSizeRel application now? (y/n): "
-if /i "%choice%"=="y" (
-    cd MinSizeRel\MinSizeRel
-    start EikonDicomViewer.exe
-)
-
-pause
+REM Build script completed - no interactive prompts

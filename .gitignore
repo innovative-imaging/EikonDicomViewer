@@ -15,3 +15,6 @@
 /DicomViewer_CPP/build
 *.md
 /DicomViewer_CPP/out/build/x64-Debug
+/.vscode
+/build
+/Reference

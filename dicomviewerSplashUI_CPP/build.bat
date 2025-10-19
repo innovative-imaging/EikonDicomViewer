@@ -19,7 +19,6 @@ if %ERRORLEVEL% NEQ 0 (
     echo 2. Run "vcvarsall.bat x64" from VS installation directory
     echo 3. Install "C++ Build Tools" workload in Visual Studio Installer
     echo.
-    pause
     exit /b 1
 )
 
@@ -36,7 +35,6 @@ if not exist "..\CompanySplashScreen.png" (
     echo   Expected location: ..\CompanySplashScreen.png
     echo   Please ensure the image file exists before building.
     echo.
-    pause
     exit /b 1
 )
 
@@ -46,7 +44,6 @@ if not exist "splash_image_data.h" (
     python convert_image.py
     if %ERRORLEVEL% NEQ 0 (
         echo ✗ Failed to generate image data!
-        pause
         exit /b 1
     )
 ) else (
@@ -75,4 +72,3 @@ if %ERRORLEVEL% EQU 0 (
 )
 
 echo.
-pause

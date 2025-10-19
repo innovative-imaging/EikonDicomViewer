@@ -23,7 +23,6 @@ echo Configuring with CMake...
 cmake .. -DCMAKE_PREFIX_PATH="%CMAKE_PREFIX_PATH%"
 if %ERRORLEVEL% neq 0 (
     echo CMake configuration failed!
-    pause
     exit /b %ERRORLEVEL%
 )
 
@@ -39,7 +38,6 @@ echo Building project...
 cmake --build . --config Release --clean-first
 if %ERRORLEVEL% neq 0 (
     echo Build failed!
-    pause
     exit /b %ERRORLEVEL%
 )
 
@@ -99,11 +97,4 @@ echo Archive location: build\Release\Release\EikonDicomViewer.7z
 echo Splash executable: build\Release\Release\DicomViewerSplash.exe
 echo ============================================
 
-REM Ask if user wants to run the application
-set /p choice="Do you want to run the application now? (y/n): "
-if /i "%choice%"=="y" (
-    cd Release\Release
-    start EikonDicomViewer.exe
-)
-
-pause
+REM Build script completed - no interactive prompts

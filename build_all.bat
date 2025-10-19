@@ -56,7 +56,6 @@ cmake .. -DCMAKE_PREFIX_PATH="%CMAKE_PREFIX_PATH%"
 if %ERRORLEVEL% neq 0 (
     echo CMake configuration failed!
     popd
-    pause
     exit /b %ERRORLEVEL%
 )
 
@@ -71,7 +70,6 @@ cmake --build . --config MinSizeRel --clean-first
 if %ERRORLEVEL% neq 0 (
     echo Build failed!
     popd
-    pause
     exit /b %ERRORLEVEL%
 )
 
@@ -119,7 +117,6 @@ echo. | cmd /c ""C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxi
 popd
 if %ERRORLEVEL% neq 0 (
     echo ✗ dicomviewerSplashUI_CPP build failed!
-    pause
     exit /b %ERRORLEVEL%
 )
 echo ✓ dicomviewerSplashUI_CPP build completed successfully.
@@ -175,6 +172,11 @@ REM Copy image format plugins (for DICOM image display)
 if not exist "%BINARIES_DIR%\imageformats" mkdir "%BINARIES_DIR%\imageformats"
 copy /Y "%SOURCE_BUILD%\imageformats\qjpeg.dll" "%BINARIES_DIR%\imageformats\"
 
+REM Copy styles plugins (for modern Windows styling)
+echo Copying styles plugins...
+if not exist "%BINARIES_DIR%\styles" mkdir "%BINARIES_DIR%\styles"
+copy /Y "%SOURCE_BUILD%\styles\qmodernwindowsstyle.dll" "%BINARIES_DIR%\styles\"
+
 REM Copy utilities
 echo Copying utilities...
 copy /Y "%SOURCE_BUILD%\7za.exe" "%BINARIES_DIR%\"
@@ -201,7 +203,6 @@ if exist "%SPLASH_UI_DIR%\bin\DicomViewerSplash.exe" (
     echo ✓ DicomViewerSplash.exe copied.
 ) else (
     echo ✗ DicomViewerSplash.exe not found!
-    pause
     exit /b 1
 )
 
