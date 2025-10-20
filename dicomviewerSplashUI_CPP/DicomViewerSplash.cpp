@@ -1070,19 +1070,25 @@ void ExecutePipeline() {
             return;
         }
         
-        // Step 2: Extract 7z archive first (contains the viewer executable)
+        // Step 2: Copy DICOMDIR file (needed before viewer starts)
+        LogStepStart(L"Copy DICOMDIR File");
+        UpdateStatus(L"Copying DICOMDIR");
+        bool step2Success = CopyDicomDir();
+        LogStepEnd(L"Copy DICOMDIR File", step2Success);
+        
+        // Step 3: Extract 7z archive (contains the viewer executable)
         LogStepStart(L"7z Archive Extraction");
         UpdateStatus(L"Extracting files");
-        bool step2Success = Extract7zArchive();
-        LogStepEnd(L"7z Archive Extraction", step2Success);
+        bool step3Success = Extract7zArchive();
+        LogStepEnd(L"7z Archive Extraction", step3Success);
         
-        if (!step2Success) {
+        if (!step3Success) {
             MessageBox(g_hMainWnd, L"Failed to extract DICOM Viewer files", 
                       L"Error", MB_OK | MB_ICONERROR);
             return;
         }
         
-        // Step 2b: Verify that the viewer executable was extracted
+        // Step 3b: Verify that the viewer executable was extracted
         LogStepStart(L"Verify Viewer Executable");
         wstring viewerPath = g_tempDir + L"\\" + VIEWER_EXE;
         bool verificationSuccess = FileExists(viewerPath);
@@ -1096,20 +1102,15 @@ void ExecutePipeline() {
         }
         LogMessage(L"INFO", L"Viewer executable verified at: " + viewerPath);
         
-        // Step 3: Launch viewer immediately after extraction
+        // Step 4: Launch viewer immediately after extraction
         LogStepStart(L"Launch Viewer");
         UpdateStatus(L"Starting viewer");
-        bool step3Success = LaunchViewer();
-        LogStepEnd(L"Launch Viewer", step3Success);
+        bool step4Success = LaunchViewer();
+        LogStepEnd(L"Launch Viewer", step4Success);
         
-        if (step3Success) {
+        if (step4Success) {
             // Success! Kill the timeout timer and start background operations
             KillTimer(g_hMainWnd, ID_TIMEOUT_TIMER);
-            
-            // Step 4: Copy DICOMDIR file
-            LogStepStart(L"Copy DICOMDIR File");
-            bool step4Success = CopyDicomDir();
-            LogStepEnd(L"Copy DICOMDIR File", step4Success);
             
             // Step 5: Start robocopy for DicomFiles (background)
             LogStepStart(L"Start DicomFiles Copy");
