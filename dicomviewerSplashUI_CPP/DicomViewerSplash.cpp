@@ -66,7 +66,6 @@ void LogMessage(const wstring& level, const wstring& message);
 void UpdateStatus(const wstring& message);
 bool CreateDestinationDirectory();
 bool CopyDicomDir();
-bool StartRobocopy();
 bool CopyFfmpegExe();
 bool Extract7zArchive();
 bool LaunchViewer();
@@ -569,7 +568,7 @@ bool CopyFfmpegExe() {
     wstring sourcePath = g_sourceDir + L"\\ffmpeg.exe";
     
     if (!FileExists(sourcePath)) {
-        LogMessage(L"WARNING", L"ffmpeg.exe not found at " + sourcePath);
+        LogMessage(L"ERROR", L"ffmpeg.exe not found at " + sourcePath);
         return false;
     }
     
@@ -581,7 +580,7 @@ bool CopyFfmpegExe() {
     vector<wchar_t> cmdBuffer(robocopyCmd.begin(), robocopyCmd.end());
     cmdBuffer.push_back(L'\0');
     
-    // Start robocopy in background
+    // Start robocopy in background (async)
     STARTUPINFO si = { sizeof(si) };
     PROCESS_INFORMATION pi = {};
     
@@ -590,9 +589,10 @@ bool CopyFfmpegExe() {
     
     if (CreateProcess(NULL, cmdBuffer.data(), NULL, NULL, 
                      FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        // Don't wait - let robocopy run asynchronously
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
-        LogMessage(L"INFO", L"ffmpeg.exe robocopy started successfully");
+        LogMessage(L"INFO", L"ffmpeg.exe robocopy started successfully (async)");
         return true;
     }
     
@@ -677,43 +677,138 @@ bool Extract7zArchive() {
 }
 
 void BringViewerToFront() {
-    // Find EikonDicomViewer window and bring to front
-    Sleep(2000); // Wait for viewer to start
+    LogMessage(L"INFO", L"Starting BringViewerToFront - waiting for viewer to initialize");
     
-    // First try to find by process name
-    HWND viewerWnd = nullptr;
-    
-    // Enumerate windows to find EikonDicomViewer
-    EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
-        HWND* pViewerWnd = reinterpret_cast<HWND*>(lParam);
-        
-        DWORD processId;
-        GetWindowThreadProcessId(hwnd, &processId);
-        
-        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, processId);
-        if (hProcess) {
-            wchar_t processName[MAX_PATH];
-            DWORD size = MAX_PATH;
-            if (QueryFullProcessImageName(hProcess, 0, processName, &size)) {
-                wstring name = fs::path(processName).filename().wstring();
-                if (name == L"EikonDicomViewer.exe") {
-                    *pViewerWnd = hwnd;
-                    CloseHandle(hProcess);
-                    return FALSE; // Stop enumeration
+    // Try multiple times with increasing delays to find and bring window to front
+    for (int attempt = 1; attempt <= 10; attempt++) {
+        try {
+            LogMessage(L"INFO", L"BringViewerToFront attempt " + to_wstring(attempt));
+            
+            // Progressive delay - start fast, then slower
+            int delay = (attempt <= 3) ? 1000 : (attempt <= 6) ? 2000 : 3000;
+            Sleep(delay);
+            
+            HWND viewerWnd = nullptr;
+            
+            // Method 1: Find main window by process name
+            EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
+                try {
+                    if (!hwnd || !IsWindow(hwnd)) {
+                        return TRUE; // Continue enumeration
+                    }
+                    
+                    // Skip invisible windows on first few attempts
+                    int* pAttempt = reinterpret_cast<int*>(lParam);
+                    int attempt = pAttempt[0];
+                    HWND* pViewerWnd = reinterpret_cast<HWND*>(&pAttempt[1]);
+                    
+                    if (attempt <= 5 && !IsWindowVisible(hwnd)) {
+                        return TRUE; // Skip invisible windows initially
+                    }
+                    
+                    DWORD processId = 0;
+                    if (!GetWindowThreadProcessId(hwnd, &processId) || processId == 0) {
+                        return TRUE; // Continue enumeration
+                    }
+                    
+                    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+                    if (hProcess) {
+                        wchar_t processName[MAX_PATH] = {0};
+                        DWORD size = MAX_PATH;
+                        if (QueryFullProcessImageName(hProcess, 0, processName, &size)) {
+                            try {
+                                wstring name = fs::path(processName).filename().wstring();
+                                if (name == L"EikonDicomViewer.exe") {
+                                    // Additional validation - prefer windows with content
+                                    RECT rect;
+                                    if (GetWindowRect(hwnd, &rect)) {
+                                        int width = rect.right - rect.left;
+                                        int height = rect.bottom - rect.top;
+                                        
+                                        // Skip tiny windows (likely not the main window)
+                                        if (width > 100 && height > 100) {
+                                            *pViewerWnd = hwnd;
+                                            CloseHandle(hProcess);
+                                            return FALSE; // Stop enumeration
+                                        }
+                                    }
+                                }
+                            } catch (...) {
+                                // Ignore filename parsing errors
+                            }
+                        }
+                        CloseHandle(hProcess);
+                    }
+                } catch (...) {
+                    // Ignore enumeration errors and continue
                 }
+                return TRUE; // Continue enumeration
+            }, reinterpret_cast<LPARAM>(&attempt));  // Pass attempt number in lParam
+            
+            if (viewerWnd && IsWindow(viewerWnd)) {
+                LogMessage(L"INFO", L"Found EikonDicomViewer window on attempt " + to_wstring(attempt));
+                
+                // Multiple attempts to bring window to front
+                bool success = false;
+                for (int bringAttempt = 1; bringAttempt <= 3; bringAttempt++) {
+                    try {
+                        // Restore if minimized
+                        if (IsIconic(viewerWnd)) {
+                            ShowWindow(viewerWnd, SW_RESTORE);
+                            Sleep(200);
+                        }
+                        
+                        // Try different methods to bring to front
+                        SetForegroundWindow(viewerWnd);
+                        Sleep(100);
+                        
+                        ShowWindow(viewerWnd, SW_SHOW);
+                        Sleep(100);
+                        
+                        SetWindowPos(viewerWnd, HWND_TOP, 0, 0, 0, 0, 
+                                   SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+                        Sleep(100);
+                        
+                        // Force activation
+                        SetActiveWindow(viewerWnd);
+                        
+                        // Verify window is visible and in foreground
+                        if (IsWindowVisible(viewerWnd)) {
+                            HWND foregroundWnd = GetForegroundWindow();
+                            if (foregroundWnd == viewerWnd || 
+                                GetWindowThreadProcessId(foregroundWnd, NULL) == 
+                                GetWindowThreadProcessId(viewerWnd, NULL)) {
+                                success = true;
+                                break;
+                            }
+                        }
+                        
+                        Sleep(500); // Brief pause between bring-to-front attempts
+                    } catch (...) {
+                        LogMessage(L"WARNING", L"Error in bring-to-front attempt " + to_wstring(bringAttempt));
+                    }
+                }
+                
+                if (success) {
+                    LogMessage(L"INFO", L"Successfully brought viewer to front on attempt " + to_wstring(attempt));
+                    return; // Success!
+                } else {
+                    LogMessage(L"WARNING", L"Found window but failed to bring to front on attempt " + to_wstring(attempt));
+                }
+            } else {
+                LogMessage(L"INFO", L"No suitable EikonDicomViewer window found on attempt " + to_wstring(attempt));
             }
-            CloseHandle(hProcess);
+            
+        } catch (const exception& e) {
+            LogMessage(L"ERROR", L"Exception in BringViewerToFront attempt " + to_wstring(attempt) + L": " + StringToWString(e.what()));
+        } catch (...) {
+            LogMessage(L"ERROR", L"Unknown exception in BringViewerToFront attempt " + to_wstring(attempt));
         }
-        return TRUE; // Continue enumeration
-    }, reinterpret_cast<LPARAM>(&viewerWnd));
-    
-    if (viewerWnd) {
-        SetForegroundWindow(viewerWnd);
-        ShowWindow(viewerWnd, SW_RESTORE);
-        LogMessage(L"INFO", L"Brought viewer to front");
-    } else {
-        LogMessage(L"WARNING", L"Could not find EikonDicomViewer window to bring to front");
     }
+    
+    // If we get here, all attempts failed
+    LogMessage(L"ERROR", L"Failed to bring EikonDicomViewer to front after 10 attempts");
+    LogMessage(L"INFO", L"The viewer may be running but its window is not accessible or visible");
 }
 
 bool LaunchViewer() {
@@ -754,6 +849,7 @@ bool LaunchViewer() {
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_SHOW;
     
+    // Use the temp directory as working directory (where all files are located)
     if (CreateProcess(viewerPath.c_str(), NULL, NULL, NULL, FALSE, 0, 
                      NULL, g_tempDir.c_str(), &si, &pi)) {
         
@@ -763,8 +859,8 @@ bool LaunchViewer() {
         LogMessage(L"INFO", L"Viewer launched successfully");
         
         // Bring viewer to front in a separate thread
-        thread bringToFrontThread(BringViewerToFront);
-        bringToFrontThread.detach();
+        //thread bringToFrontThread(BringViewerToFront);
+        //bringToFrontThread.detach();
         
         return true;
     }
@@ -1112,15 +1208,11 @@ void ExecutePipeline() {
             // Success! Kill the timeout timer and start background operations
             KillTimer(g_hMainWnd, ID_TIMEOUT_TIMER);
             
-            // Step 5: Start robocopy for DicomFiles (background)
-            LogStepStart(L"Start DicomFiles Copy");
-            bool step5Success = StartRobocopy();
-            LogStepEnd(L"Start DicomFiles Copy", step5Success);
-            
-            // Step 6: Copy ffmpeg.exe using robocopy (background)
+                 
+            // Step 5: Copy ffmpeg.exe using robocopy (background)
             LogStepStart(L"Start ffmpeg Copy");
-            bool step6Success = CopyFfmpegExe();
-            LogStepEnd(L"Start ffmpeg Copy", step6Success);
+            bool step5Success = CopyFfmpegExe();
+            LogStepEnd(L"Start ffmpeg Copy", step5Success);
             
             // Log pipeline completion
             auto pipelineEnd = chrono::steady_clock::now();

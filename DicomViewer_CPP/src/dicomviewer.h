@@ -28,6 +28,10 @@
 #include <QtWidgets/QSlider>
 #include <QtWidgets/QSpinBox>
 #include <QtWidgets/QGroupBox>
+#include <QtWidgets/QStatusBar>
+#include <QtCore/QProcess>
+#include <QtCore/QTimer>
+#include <QtCore/QThread>
 #include <QtMultimedia/QMediaRecorder>
 #include <QtMultimedia/QMediaCaptureSession>
 #include <QtCore/QUrl>
@@ -64,7 +68,10 @@
 #include "saveimagedialog.h"
 #include "saverundialog.h"
 
-// Image Processing Pipeline - Clean Architecture
+// Forward declarations
+class DvdCopyWorker;
+
+// DVD Copy Worker - Background thread worker for DVD detection and copying
 class ImageProcessingPipeline
 {
 public:
@@ -123,11 +130,22 @@ protected:
     void closeEvent(QCloseEvent *event) override;
     bool eventFilter(QObject *obj, QEvent *event) override;
 
+signals:
+    void requestRobocopyStart(const QString& dvdPath);
+
 private slots:
     // Simplified framework integration slots
     void onPlaybackStateChanged(DicomPlaybackController::PlaybackState oldState, DicomPlaybackController::PlaybackState newState);
     void onCurrentFrameChanged(int frameIndex, int totalFrames);
     void onFrameRequested(int frameIndex);
+    
+    // DVD copy worker slots
+    void onDvdDetected(const QString& dvdPath);
+    void onCopyStarted();
+    void onFileProgress(const QString& fileName, int progress);
+    void onOverallProgress(int percentage, const QString& statusText);
+    void onCopyCompleted(bool success);
+    void onWorkerError(const QString& error);
     
     // Essential input handler slots
     void onPlayPauseRequested();
@@ -155,6 +173,9 @@ private slots:
     void onFirstFrameInfo(const QString& patientName, const QString& patientId, int totalFrames);
     void onLoadingError(const QString& errorMessage);
     void onLoadingProgress(int currentFrame, int totalFrames);
+    
+    // Copy monitoring slots
+    void onCopyProgressTimeout();
     
     // Image transformation slots
     void horizontalFlip();
@@ -216,6 +237,10 @@ private:
     void toggleDicomInfo();
     void createDicomInfoPanel();
     void populateDicomInfo(const QString& filePath);
+    
+    // Status bar methods
+    void createStatusBar();
+    void updateStatusBar(const QString& message, int progress = -1);
     
     // Progressive loading methods
     void displayCachedFrame(int frameIndex);
@@ -365,6 +390,30 @@ private:
     // DICOM reader
     DicomReader* m_dicomReader;
     
+    // DVD copy management system (now handled by DvdCopyWorker)
+    QTimer* m_copyProgressTimer;  // Still used for periodic tree updates
+    QString m_dvdSourcePath;      // Still used for tracking source path
+    QString m_localDestPath;      // Still used for destination path
+    bool m_copyInProgress;        // Still used for copy state tracking
+    int m_currentCopyProgress;    // Still used for progress tracking
+    bool m_dvdDetectionInProgress; // Prevent multiple simultaneous DVD detection
+    QStringList m_completedFiles; // Track files that have reached 100% completion
+    QSet<QString> m_fullyCompletedFiles; // Track files that are fully accessible (100% + file exists)
+    
+    // Background DVD detection and copy worker
+    QThread* m_dvdWorkerThread;
+    DvdCopyWorker* m_dvdWorker;
+    
+    // Copy progress UI components
+    QWidget* m_progressWidget;
+    QLabel* m_progressLabel;
+    QProgressBar* m_progressBar;
+    
+    // Status bar components
+    QStatusBar* m_statusBar;
+    QLabel* m_statusLabel;
+    QProgressBar* m_statusProgressBar;
+    
     // Helper methods for transformations
     bool hasOriginalPixelData() const;
     void refreshCurrentFrameDisplay();
@@ -377,6 +426,19 @@ private:
     
     // Helper method to register transformation actions for enable/disable
     void registerTransformationAction(const QString& name, QAction* action);
+    
+    // DVD copy management methods
+    void detectAndStartDvdCopy();
+    QString findDvdWithDicomFiles();
+    void handleMissingFile(const QString& path);
+    void parseRobocopyOutput(const QString& output);
+    qint64 getExpectedFileSize(const QString& filePath);
+    bool hasActuallyMissingFiles();
+    
+    // Background DVD worker methods
+    void initializeDvdWorker();
+    void updateTreeItemWithProgress(const QString& fileName, int progress);
+    void updateSpecificTreeItemProgress(const QString& fileName, int progress);
     
     // RDSR (Radiation Dose Structured Report) methods
     void displayReport(const QString& filePath);

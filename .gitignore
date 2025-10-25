@@ -18,3 +18,8 @@
 /.vscode
 /build
 /Reference
+/dicomviewerSplashUI_CPP/DicomViewerSplash.exe
+/dvd_copy_test
+/TestContent
+/test_dvd_content
+/DicomDir.iso

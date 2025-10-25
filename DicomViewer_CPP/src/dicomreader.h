@@ -66,6 +66,17 @@ public:
     // Utility methods
     static QString cleanDicomText(const QString& text);
     static QString formatDate(const QString& dicomDate);
+    
+    // Copy monitoring support
+    void refreshFileExistenceStatus();
+    void startProactiveCopyMonitoring();
+    double calculateProgress() const;
+    
+    // Get image info for a specific file
+    DicomImageInfo getImageInfoForFile(const QString& filePath) const;
+    
+    // Get frame count from DICOM file
+    int getFrameCountFromFile(const QString& filePath);
 
 private:
     QMap<QString, DicomPatientInfo> m_patients;
@@ -76,6 +87,8 @@ private:
     // Private methods
     bool isDicomDir(const QString& filePath);
     void clearData();
+    bool isStructuredReport(const QString& filePath);
+    void updateImageDisplayNameFromFile(DicomImageInfo& image);
     
 #ifdef HAVE_DCMTK
     bool parseWithDcmtk(const QString& dicomdirPath);
@@ -87,7 +100,6 @@ private:
                                      QString& currentPatientID, QString& currentStudyUID, QString& currentSeriesUID);
     QString readDicomString(QFile& file, quint32 length);
     quint32 readDicomInteger(QFile& file, quint32 length);
-    int getFrameCountFromFile(const QString& filePath);
     QString extractSeriesDescriptionFromFile(const QString& filePath);
     bool parseWithSimpleMethod(const QString& dicomdirPath);
     QList<DicomImageInfo> expandDirectoryEntries(const QList<DicomImageInfo>& images);

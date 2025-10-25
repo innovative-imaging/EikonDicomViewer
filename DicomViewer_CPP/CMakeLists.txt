@@ -70,6 +70,8 @@ set(SOURCES
     src/progressiveframeloader.h
     src/DicomFrameProcessor.cpp
     src/DicomFrameProcessor.h
+    src/dvdcopyworker.cpp
+    src/dvdcopyworker.h
     src/saveimagedialog.cpp
     src/saveimagedialog.h
     src/saverundialog.cpp

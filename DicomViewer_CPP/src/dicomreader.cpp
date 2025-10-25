@@ -101,6 +101,8 @@ void DicomReader::populateTreeWidget(QTreeWidget* treeWidget)
 {
     if (!treeWidget) return;
     
+    qDebug() << "##### populateTreeWidget() called - clearing and repopulating tree #####";
+    
     treeWidget->clear();
     
     // Update header
@@ -158,15 +160,45 @@ void DicomReader::populateTreeWidget(QTreeWidget* treeWidget)
                 // Skip directory expansion for now - just use the actual DICOM files as listed
                 // QList<DicomImageInfo> expandedImages = expandDirectoryEntries(sortedImages);
                 
+                int imageIndex = 0;  // Track image index for fallback naming
                 for (const DicomImageInfo& image : sortedImages) {
-                    // Always show the actual DICOM filename
+                    imageIndex++;
+                    // Generate proper display names that work even when files don't exist yet
                     QString displayName;
                     if (!image.displayName.isEmpty() && image.displayName.startsWith("SR DOC")) {
                         // Keep SR DOC names as they are meaningful
                         displayName = image.displayName;
                     } else {
-                        // Always use the actual DICOM filename from the file path
-                        displayName = QFileInfo(image.filePath).fileName();
+                        // Extract meaningful filename from file path, even if file doesn't exist yet
+                        QFileInfo pathInfo(image.filePath);
+                        QString filename = pathInfo.fileName();
+                        
+                        // Debug: Show what we're getting - CRITICAL DEBUG
+                        qDebug() << "************************ TREE POPULATION DEBUG ************************";
+                        qDebug() << "[TREE FILENAME DEBUG]" 
+                                 << "FilePath:" << image.filePath 
+                                 << "Filename:" << filename 
+                                 << "DisplayName:" << image.displayName
+                                 << "FileExists:" << image.fileExists;
+                        qDebug() << "************************ END TREE DEBUG ************************";
+                        
+                        // ALWAYS use the actual filename from the path if we have one
+                        // Don't check file existence - we want to show the real filename even if file doesn't exist yet
+                        if (!filename.isEmpty() && filename != "DICOMFiles" && filename != "DICOMDIR" && 
+                            !filename.endsWith(".") && filename.length() > 3) {
+                            // Use the actual DICOM filename - this should be the filename from DICOMDIR
+                            displayName = filename;
+                            qDebug() << "[TREE] Using actual filename:" << filename;
+                        } else {
+                            // Only fall back to generic names if we really don't have a valid filename
+                            qDebug() << "[TREE] Falling back to generic name for invalid filename:" << filename;
+                            if (image.instanceNumber > 0) {
+                                displayName = QString("Image_%1").arg(image.instanceNumber, 3, 10, QChar('0'));
+                            } else {
+                                // Fallback to generic numbering using current index
+                                displayName = QString("Image_%1").arg(imageIndex, 3, 10, QChar('0'));
+                            }
+                        }
                     }
                     
                     // Add frame count information for multiframe images
@@ -177,6 +209,7 @@ void DicomReader::populateTreeWidget(QTreeWidget* treeWidget)
                     QTreeWidgetItem* imageItem = new QTreeWidgetItem(QStringList() << displayName);
                     
                     // Set UserRole data based on content type
+                    // Only check display name from DICOMDIR parsing - don't check individual files
                     if (!image.displayName.isEmpty() && image.displayName.startsWith("SR DOC")) {
                         // This is a Structured Report document - mark as "report" type
                         imageItem->setData(0, Qt::UserRole, QVariantList() << "report" << image.filePath);
@@ -194,7 +227,7 @@ void DicomReader::populateTreeWidget(QTreeWidget* treeWidget)
                         iconName = "List.png"; // Use document/list icon for SR
                         tooltip = "Structured Report (SR) Document";
                     } else if (!image.fileExists) {
-                        iconName = "Loading.png";
+                        iconName = "Loading.png"; // Fixed: was loading_96.png, now Loading.png
                         tooltip = QString("Loading %1\nFile is being copied from media...")
                                  .arg(image.frameCount > 1 ? "multiframe image" : "DICOM image");
                         imageItem->setForeground(0, QColor(180, 180, 180)); // Gray out text
@@ -334,96 +367,89 @@ bool DicomReader::parseWithDcmtk(const QString& dicomdirPath)
                             
                             QString sopUID = QString::fromStdString(sopInstanceUID.c_str());
                             
-                            // Convert file ID to path
-                            std::string pathStr = fileId.c_str();
+                            // CRITICAL FIX: DCM_ReferencedFileID can be multi-valued (directory + filename)
+                            // We need to get ALL components, not just the first one
+                            QString fullRelativePath;
+                            DcmElement *fileIdElement = nullptr;
+                            if (inst->findAndGetElement(DCM_ReferencedFileID, fileIdElement).good() && fileIdElement) {
+                                // Check if it's a multi-valued field
+                                Uint32 numValues = fileIdElement->getVM();
+                                qDebug() << "[DICOMDIR MULTI-VALUE] DCM_ReferencedFileID has" << numValues << "values";
+                                
+                                QStringList pathComponents;
+                                for (Uint32 i = 0; i < numValues; i++) {
+                                    OFString component;
+                                    if (fileIdElement->getOFString(component, i).good()) {
+                                        QString componentStr = QString::fromStdString(component.c_str());
+                                        if (!componentStr.isEmpty()) {
+                                            pathComponents.append(componentStr);
+                                            qDebug() << "[DICOMDIR COMPONENT" << i << "]" << componentStr;
+                                        }
+                                    }
+                                }
+                                
+                                // Join all components with path separator
+                                if (!pathComponents.isEmpty()) {
+                                    fullRelativePath = pathComponents.join("/");
+                                } else {
+                                    // Fallback to single value if multi-value parsing failed
+                                    fullRelativePath = QString::fromStdString(fileId.c_str());
+                                }
+                            } else {
+                                // Fallback to original method
+                                fullRelativePath = QString::fromStdString(fileId.c_str());
+                            }
+                            
+                            // Convert to proper path format
+                            std::string pathStr = fullRelativePath.toStdString();
                             std::replace(pathStr.begin(), pathStr.end(), '\\', '/');
                             QString relativePath = QString::fromStdString(pathStr);
                             QString fullPath = m_basePath + "/" + relativePath;
                             fullPath = QDir::toNativeSeparators(fullPath);
                             
-                            // Check if this path is a directory (common issue with some DICOMDIR structures)
-                            QFileInfo pathInfo(fullPath);
-                            if (pathInfo.isDir()) {
-                                // CRITICAL FIX: For directory references, we should NOT add all files in the directory
-                                // Instead, we need to find the specific file that matches this SOP Instance UID
+                            qDebug() << "[DICOMDIR DEBUG] FileID from DICOMDIR:" << QString::fromStdString(fileId.c_str())
+                                     << "FullRelativePath:" << fullRelativePath
+                                     << "RelativePath:" << relativePath << "FullPath:" << fullPath;
+                            
+                            // Always use the file reference from DICOMDIR, regardless of current file existence
+                            // The DICOMDIR contains the authoritative list of what files should exist
+                            if (!sopUID.isEmpty() && !processedFiles.contains(sopUID)) {
+                                processedFiles.insert(sopUID);
+                                seriesInstanceCount++;
+                                imageCount++;
                                 
-                                if (!sopUID.isEmpty()) {
-                                    // Try to find the specific file that matches this SOP Instance UID
-                                    QDir dir(fullPath);
-                                    QStringList nameFilters;
-                                    nameFilters << "*.dcm" << "*.DCM" << "*.dicom" << "*.DICOM" << "*";
-                                    QFileInfoList fileList = dir.entryInfoList(nameFilters, QDir::Files | QDir::Readable, QDir::Name);
-                                    
-                                    bool foundMatchingFile = false;
-                                    
-                                    // Search for the file that contains this SOP Instance UID
-                                    for (const QFileInfo& fileInfo : fileList) {
-                                        QString fileName = fileInfo.fileName();
-                                        if (fileName.endsWith(".txt", Qt::CaseInsensitive) ||
-                                            fileName.endsWith(".inf", Qt::CaseInsensitive) ||
-                                            fileName.endsWith(".log", Qt::CaseInsensitive) ||
-                                            fileName == "DICOMDIR") {
-                                            continue;
-                                        }
-                                        
-                                        // Check if this file matches the SOP Instance UID
-                                        // For efficiency, we'll use the filename as a heuristic first
-                                        if (fileName.contains(sopUID, Qt::CaseInsensitive)) {
-                                            QString absoluteFilePath = fileInfo.absoluteFilePath();
-                                            
-                                            // Use the SOP UID as the unique key to prevent duplicates
-                                            if (!processedFiles.contains(sopUID)) {
-                                                processedFiles.insert(sopUID);
-                                                seriesInstanceCount++;
-                                                imageCount++;
-                                                
-                                                DicomImageInfo imageInfo;
-                                                imageInfo.filePath = absoluteFilePath;
-                                                imageInfo.isDirectory = false;
-                                                imageInfo.instanceNumber = !instanceNumberStr.empty() ? 
-                                                    atoi(instanceNumberStr.c_str()) : seriesInstanceCount;
-                                                imageInfo.frameCount = getFrameCountFromFile(absoluteFilePath);
-                                                imageInfo.fileExists = QFile::exists(absoluteFilePath);
-                                                
-                                                seriesInfo.images.append(imageInfo);
-                                                m_totalImages++;
-                                                foundMatchingFile = true;
-                                                break;
-                                            } else {
-                                                foundMatchingFile = true;
-                                                break;
-                                            }
-                                        }
+                                DicomImageInfo imageInfo;
+                                imageInfo.filePath = fullPath;  // Use the path exactly as specified in DICOMDIR
+                                imageInfo.isDirectory = false;
+                                
+                                // CRITICAL: Debug what filename we'll extract from this path
+                                QString extractedFilename = QFileInfo(fullPath).fileName();
+                                qDebug() << ">>> DICOMDIR PARSE: fullPath=" << fullPath 
+                                         << "extractedFilename=" << extractedFilename;
+                                imageInfo.instanceNumber = !instanceNumberStr.empty() ? 
+                                    atoi(instanceNumberStr.c_str()) : seriesInstanceCount;
+                                imageInfo.frameCount = 1;
+                                imageInfo.fileExists = QFile::exists(fullPath);
+                                
+                                // Try to get frame count from DICOMDIR record first
+                                OFString numberOfFramesStr;
+                                if (inst->findAndGetOFString(DCM_NumberOfFrames, numberOfFramesStr).good() && 
+                                    !numberOfFramesStr.empty()) {
+                                    int frameCount = atoi(numberOfFramesStr.c_str());
+                                    if (frameCount > 0 && frameCount < 100000) { // Sanity check
+                                        imageInfo.frameCount = frameCount;
+                                        qDebug() << "[DICOMDIR FRAMES] File:" << extractedFilename 
+                                                 << "frames from DICOMDIR:" << frameCount;
                                     }
-                                    
-                                    if (!foundMatchingFile) {
-                                    }
-                                } else {
+                                } else if (imageInfo.fileExists) {
+                                    // Fallback: get frame count from actual file if DICOMDIR doesn't have it
+                                    imageInfo.frameCount = getFrameCountFromFile(fullPath);
+                                    qDebug() << "[FILE FRAMES] File:" << extractedFilename 
+                                             << "frames from file:" << imageInfo.frameCount;
                                 }
-                            } else {
-                                // This is a direct file reference
-                                if (!sopUID.isEmpty() && !processedFiles.contains(sopUID)) {
-                                    processedFiles.insert(sopUID);
-                                    seriesInstanceCount++;
-                                    imageCount++;
-                                    
-                                    DicomImageInfo imageInfo;
-                                    imageInfo.filePath = fullPath;
-                                    imageInfo.isDirectory = false;
-                                    imageInfo.instanceNumber = !instanceNumberStr.empty() ? 
-                                        atoi(instanceNumberStr.c_str()) : seriesInstanceCount;
-                                    imageInfo.frameCount = 1;
-                                    imageInfo.fileExists = QFile::exists(fullPath);
-                                    
-                                    if (imageInfo.fileExists) {
-                                        imageInfo.frameCount = getFrameCountFromFile(fullPath);
-                                    }
-                                    
-                                    seriesInfo.images.append(imageInfo);
-                                    m_totalImages++;
-                                    
-                                } else {
-                                }
+                                
+                                seriesInfo.images.append(imageInfo);
+                                m_totalImages++;
                             }
                         }
                     }
@@ -437,8 +463,41 @@ bool DicomReader::parseWithDcmtk(const QString& dicomdirPath)
                             
                             QString sopUID = QString::fromStdString(sopInstanceUID.c_str());
                             
-                            // Convert file ID to path
-                            std::string pathStr = fileId.c_str();
+                            // CRITICAL FIX: DCM_ReferencedFileID can be multi-valued (directory + filename)
+                            // Apply same fix as for images
+                            QString fullRelativePath;
+                            DcmElement *fileIdElement = nullptr;
+                            if (inst->findAndGetElement(DCM_ReferencedFileID, fileIdElement).good() && fileIdElement) {
+                                // Check if it's a multi-valued field
+                                Uint32 numValues = fileIdElement->getVM();
+                                qDebug() << "[DICOMDIR SR MULTI-VALUE] DCM_ReferencedFileID has" << numValues << "values";
+                                
+                                QStringList pathComponents;
+                                for (Uint32 i = 0; i < numValues; i++) {
+                                    OFString component;
+                                    if (fileIdElement->getOFString(component, i).good()) {
+                                        QString componentStr = QString::fromStdString(component.c_str());
+                                        if (!componentStr.isEmpty()) {
+                                            pathComponents.append(componentStr);
+                                            qDebug() << "[DICOMDIR SR COMPONENT" << i << "]" << componentStr;
+                                        }
+                                    }
+                                }
+                                
+                                // Join all components with path separator
+                                if (!pathComponents.isEmpty()) {
+                                    fullRelativePath = pathComponents.join("/");
+                                } else {
+                                    // Fallback to single value if multi-value parsing failed
+                                    fullRelativePath = QString::fromStdString(fileId.c_str());
+                                }
+                            } else {
+                                // Fallback to original method
+                                fullRelativePath = QString::fromStdString(fileId.c_str());
+                            }
+                            
+                            // Convert to proper path format
+                            std::string pathStr = fullRelativePath.toStdString();
                             std::replace(pathStr.begin(), pathStr.end(), '\\', '/');
                             QString relativePath = QString::fromStdString(pathStr);
                             QString fullPath = m_basePath + "/" + relativePath;
@@ -457,79 +516,77 @@ bool DicomReader::parseWithDcmtk(const QString& dicomdirPath)
                                     nameFilters << "*.dcm" << "*.DCM" << "*.dicom" << "*.DICOM" << "*";
                                     QFileInfoList fileList = dir.entryInfoList(nameFilters, QDir::Files | QDir::Readable, QDir::Name);
                                     
-                                    bool foundMatchingFile = false;
+                                    // CRITICAL FIX: Always add the DICOMDIR entry regardless of file existence
+                                    // The progressive loader will handle missing files
                                     
-                                    // Search for the file that contains this SOP Instance UID
-                                    for (const QFileInfo& fileInfo : fileList) {
-                                        QString fileName = fileInfo.fileName();
-                                        if (fileName.endsWith(".txt", Qt::CaseInsensitive) ||
-                                            fileName.endsWith(".inf", Qt::CaseInsensitive) ||
-                                            fileName.endsWith(".log", Qt::CaseInsensitive) ||
-                                            fileName == "DICOMDIR") {
-                                            continue;
+                                    // Use the SOP UID as the unique key to prevent duplicates
+                                    if (!processedFiles.contains(sopUID)) {
+                                        processedFiles.insert(sopUID);
+                                        seriesInstanceCount++;
+                                        imageCount++;
+                                        
+                                        // Determine record type name
+                                        QString recordTypeStr;
+                                        switch (recordType) {
+                                            case ERT_root: recordTypeStr = "ROOT"; break;
+                                            case ERT_Curve: recordTypeStr = "CURVE"; break;
+                                            case ERT_FilmBox: recordTypeStr = "FILM BOX"; break;
+                                            case ERT_FilmSession: recordTypeStr = "FILM SESSION"; break;
+                                            case ERT_Image: recordTypeStr = "IMAGE"; break;
+                                            case ERT_ImageBox: recordTypeStr = "IMAGE BOX"; break;
+                                            case ERT_Interpretation: recordTypeStr = "INTERPRETATION"; break;
+                                            case ERT_ModalityLut: recordTypeStr = "MODALITY LUT"; break;
+                                            case ERT_Mrdr: recordTypeStr = "MRDR"; break;
+                                            case ERT_Overlay: recordTypeStr = "OVERLAY"; break;
+                                            case ERT_Patient: recordTypeStr = "PATIENT"; break;
+                                            case ERT_PrintQueue: recordTypeStr = "PRINT QUEUE"; break;
+                                            case ERT_Private: recordTypeStr = "PRIVATE"; break;
+                                            case ERT_Results: recordTypeStr = "RESULTS"; break;
+                                            case ERT_Series: recordTypeStr = "SERIES"; break;
+                                            case ERT_Study: recordTypeStr = "STUDY"; break;
+                                            case ERT_StudyComponent: recordTypeStr = "STUDY COMPONENT"; break;
+                                            case ERT_Topic: recordTypeStr = "TOPIC"; break;
+                                            case ERT_Visit: recordTypeStr = "VISIT"; break;
+                                            case ERT_VoiLut: recordTypeStr = "VOI LUT"; break;
+                                            default: 
+                                                recordTypeStr = "SR DOC";
+                                                break;
                                         }
                                         
-                                        // Check if this file matches the SOP Instance UID
-                                        // For efficiency, we'll use the filename as a heuristic first
-                                        if (fileName.contains(sopUID, Qt::CaseInsensitive)) {
-                                            QString absoluteFilePath = fileInfo.absoluteFilePath();
+                                        // Create the expected file path based on DICOMDIR reference
+                                        QString expectedFilePath = fullPath;
+                                        
+                                        // If it's a directory reference, construct the likely filename
+                                        if (pathInfo.isDir()) {
+                                            QString baseDir = fullPath;
+                                            QString sopUidFileName = sopUID + ".dcm";
                                             
-                                            // Use the SOP UID as the unique key to prevent duplicates
-                                            if (!processedFiles.contains(sopUID)) {
-                                                processedFiles.insert(sopUID);
-                                                seriesInstanceCount++;
-                                                imageCount++;
-                                                
-                                                // Determine record type name
-                                                QString recordTypeStr;
-                                                switch (recordType) {
-                                                    case ERT_root: recordTypeStr = "ROOT"; break;
-                                                    case ERT_Curve: recordTypeStr = "CURVE"; break;
-                                                    case ERT_FilmBox: recordTypeStr = "FILM BOX"; break;
-                                                    case ERT_FilmSession: recordTypeStr = "FILM SESSION"; break;
-                                                    case ERT_Image: recordTypeStr = "IMAGE"; break;
-                                                    case ERT_ImageBox: recordTypeStr = "IMAGE BOX"; break;
-                                                    case ERT_Interpretation: recordTypeStr = "INTERPRETATION"; break;
-                                                    case ERT_ModalityLut: recordTypeStr = "MODALITY LUT"; break;
-                                                    case ERT_Mrdr: recordTypeStr = "MRDR"; break;
-                                                    case ERT_Overlay: recordTypeStr = "OVERLAY"; break;
-                                                    case ERT_Patient: recordTypeStr = "PATIENT"; break;
-                                                    case ERT_PrintQueue: recordTypeStr = "PRINT QUEUE"; break;
-                                                    case ERT_Private: recordTypeStr = "PRIVATE"; break;
-                                                    case ERT_Results: recordTypeStr = "RESULTS"; break;
-                                                    case ERT_Series: recordTypeStr = "SERIES"; break;
-                                                    case ERT_Study: recordTypeStr = "STUDY"; break;
-                                                    case ERT_StudyComponent: recordTypeStr = "STUDY COMPONENT"; break;
-                                                    case ERT_Topic: recordTypeStr = "TOPIC"; break;
-                                                    case ERT_Visit: recordTypeStr = "VISIT"; break;
-                                                    case ERT_VoiLut: recordTypeStr = "VOI LUT"; break;
-                                                    default: 
-                                                        recordTypeStr = "SR DOC";
-                                                        break;
-                                                }
-                                                
-                                                DicomImageInfo docInfo;
-                                                docInfo.filePath = absoluteFilePath;
-                                                docInfo.isDirectory = false;
-                                                docInfo.instanceNumber = !instanceNumberStr.empty() ? 
-                                                    atoi(instanceNumberStr.c_str()) : seriesInstanceCount;
-                                                docInfo.frameCount = 1;
-                                                docInfo.fileExists = QFile::exists(absoluteFilePath);
-                                                docInfo.displayName = QString("%1 %2").arg(recordTypeStr).arg(seriesInstanceCount);
-                                                
-                                                seriesInfo.images.append(docInfo);
-                                                m_totalImages++;
-                                                foundMatchingFile = true;
-                                                break;
+                                            // Try to find an actual file, but don't require it to exist
+                                            QDir dir(baseDir);
+                                            QStringList nameFilters;
+                                            nameFilters << "*.dcm" << "*.DCM" << "*.dicom" << "*.DICOM";
+                                            QFileInfoList fileList = dir.entryInfoList(nameFilters, QDir::Files, QDir::Name);
+                                            
+                                            if (!fileList.isEmpty()) {
+                                                // Use the first DICOM file found (will be checked for existence later)
+                                                expectedFilePath = fileList.first().absoluteFilePath();
                                             } else {
-                                                foundMatchingFile = true;
-                                                break;
+                                                // No files found, construct expected path anyway
+                                                expectedFilePath = baseDir + "/" + sopUidFileName;
                                             }
                                         }
-                                    }
-                                    
-                                    if (!foundMatchingFile) {
-                                        // Could not find matching file in directory
+                                        
+                                        DicomImageInfo docInfo;
+                                        docInfo.filePath = expectedFilePath;
+                                        docInfo.isDirectory = false;
+                                        docInfo.instanceNumber = !instanceNumberStr.empty() ? 
+                                            atoi(instanceNumberStr.c_str()) : seriesInstanceCount;
+                                        docInfo.frameCount = 1;
+                                        docInfo.fileExists = QFile::exists(expectedFilePath);
+                                        docInfo.displayName = QString("%1 %2").arg(recordTypeStr).arg(seriesInstanceCount);
+                                        
+                                        seriesInfo.images.append(docInfo);
+                                        m_totalImages++;
                                     }
                                 } else {
                                     // No SOP Instance UID to match against
@@ -733,6 +790,179 @@ QString DicomReader::extractSeriesDescriptionFromFile(const QString& filePath)
     Q_UNUSED(filePath)
     return "No Series Description";
 #endif
+}
+
+void DicomReader::refreshFileExistenceStatus()
+{
+    // Update file existence status for all images in all patients/studies/series
+    for (auto patientIt = m_patients.begin(); patientIt != m_patients.end(); ++patientIt) {
+        DicomPatientInfo& patient = patientIt.value();
+        for (auto studyIt = patient.studies.begin(); studyIt != patient.studies.end(); ++studyIt) {
+            DicomStudyInfo& study = studyIt.value();
+            for (auto seriesIt = study.series.begin(); seriesIt != study.series.end(); ++seriesIt) {
+                DicomSeriesInfo& series = seriesIt.value();
+                for (DicomImageInfo& image : series.images) {
+                    // Update file existence status
+                    image.fileExists = QFile::exists(image.filePath);
+                }
+            }
+        }
+    }
+}
+
+void DicomReader::startProactiveCopyMonitoring()
+{
+    // Simplified implementation - just refresh file status
+    // The main DicomViewer now handles robocopy detection and progress monitoring
+    refreshFileExistenceStatus();
+    qDebug() << "DicomReader: Refreshed file existence status for proactive copy monitoring";
+}
+
+double DicomReader::calculateProgress() const
+{
+    if (m_totalImages == 0) {
+        return 0.0;
+    }
+    
+    int existingFiles = 0;
+    int totalFiles = 0;
+    
+    // Count existing files vs total files
+    for (auto patientIt = m_patients.begin(); patientIt != m_patients.end(); ++patientIt) {
+        const DicomPatientInfo& patient = patientIt.value();
+        for (auto studyIt = patient.studies.begin(); studyIt != patient.studies.end(); ++studyIt) {
+            const DicomStudyInfo& study = studyIt.value();
+            for (auto seriesIt = study.series.begin(); seriesIt != study.series.end(); ++seriesIt) {
+                const DicomSeriesInfo& series = seriesIt.value();
+                for (const DicomImageInfo& image : series.images) {
+                    totalFiles++;
+                    if (image.fileExists) {
+                        existingFiles++;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Calculate percentage
+    if (totalFiles == 0) {
+        return 100.0; // No files to copy
+    }
+    
+    double progress = (static_cast<double>(existingFiles) / static_cast<double>(totalFiles)) * 100.0;
+    return qBound(0.0, progress, 100.0); // Ensure progress is between 0 and 100
+}
+
+bool DicomReader::isStructuredReport(const QString& filePath)
+{
+    if (!QFile::exists(filePath)) {
+        return false;
+    }
+    
+#ifdef HAVE_DCMTK
+    try {
+        DcmFileFormat fileformat;
+        OFCondition result = fileformat.loadFile(filePath.toLocal8Bit().constData());
+        
+        if (result.bad()) {
+            return false;
+        }
+        
+        DcmDataset* dataset = fileformat.getDataset();
+        if (!dataset) {
+            return false;
+        }
+        
+        // Check SOP Class UID for known SR types
+        OFString sopClassUID;
+        if (dataset->findAndGetOFString(DCM_SOPClassUID, sopClassUID).good()) {
+            QString sopUID = QString::fromStdString(sopClassUID.c_str());
+            
+            // Debug: Log the SOP Class UID we found
+            qDebug() << "DICOM file SOP Class UID:" << sopUID;
+            
+            // Known SR SOP Class UIDs
+            if (sopUID == "1.2.840.10008.5.1.4.1.1.88.67" || // X-Ray Radiation Dose SR
+                sopUID == "1.2.840.10008.5.1.4.1.1.88.11" || // Basic Text SR
+                sopUID == "1.2.840.10008.5.1.4.1.1.88.22" || // Enhanced SR
+                sopUID == "1.2.840.10008.5.1.4.1.1.88.33" || // Comprehensive SR
+                sopUID == "1.2.840.10008.5.1.4.1.1.88.40" || // Procedure Log SR
+                sopUID == "1.2.840.10008.5.1.4.1.1.88.50" || // Mammography CAD SR
+                sopUID == "1.2.840.10008.5.1.4.1.1.88.59") {  // Key Object Selection
+                qDebug() << "File identified as SR document:" << filePath;
+                return true;
+            } else {
+                qDebug() << "File identified as regular DICOM image:" << filePath;
+                return false;
+            }
+        }
+    } catch (...) {
+        qDebug() << "Exception while checking DICOM file:" << filePath;
+        return false;
+    }
+#endif
+    return false;
+}
+
+void DicomReader::updateImageDisplayNameFromFile(DicomImageInfo& image)
+{
+    if (isStructuredReport(image.filePath)) {
+        if (!image.displayName.startsWith("SR DOC")) {
+            image.displayName = QString("SR DOC - X-Ray Radiation Dose Report");
+        }
+    } else {
+        // For regular images, try to get better metadata if available
+        if (image.displayName.isEmpty() || image.displayName.startsWith("Image_")) {
+            QFileInfo pathInfo(image.filePath);
+            image.displayName = pathInfo.fileName();
+        }
+    }
+}
+
+DicomImageInfo DicomReader::getImageInfoForFile(const QString& filePath) const
+{
+    QString targetFileName = QFileInfo(filePath).fileName();
+    qDebug() << "[ICON DEBUG] Looking for image info for file:" << targetFileName << "from path:" << filePath;
+    
+    // Search through all patients, studies, series to find the file
+    int itemCount = 0;
+    for (const auto& patient : m_patients) {
+        for (const auto& study : patient.studies) {
+            for (const auto& series : study.series) {
+                for (const auto& image : series.images) {
+                    itemCount++;
+                    QFileInfo imageFileInfo(image.filePath);
+                    QString imageFileName = imageFileInfo.fileName();
+                    
+                    // Debug first few items
+                    if (itemCount <= 3) {
+                        qDebug() << "[ICON DEBUG]" << itemCount << "Checking:" << imageFileName << "frames:" << image.frameCount;
+                    }
+                    
+                    // Match by filename (case insensitive)
+                    if (imageFileName.compare(targetFileName, Qt::CaseInsensitive) == 0) {
+                        qDebug() << "[ICON DEBUG] ✓ MATCH FOUND:" << imageFileName << "frames:" << image.frameCount;
+                        return image;
+                    }
+                    
+                    // Also try exact path match
+                    if (image.filePath == filePath) {
+                        qDebug() << "[ICON DEBUG] ✓ EXACT PATH MATCH:" << imageFileName << "frames:" << image.frameCount;
+                        return image;
+                    }
+                }
+            }
+        }
+    }
+    
+    qDebug() << "[ICON DEBUG] ✗ NO MATCH FOUND for:" << targetFileName << "- returning default (1 frame)";
+    
+    // Return default if not found
+    DicomImageInfo defaultInfo;
+    defaultInfo.filePath = filePath;
+    defaultInfo.frameCount = 1;
+    defaultInfo.fileExists = false;
+    return defaultInfo;
 }
 
 #endif // HAVE_DCMTK
