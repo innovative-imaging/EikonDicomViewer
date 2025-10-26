@@ -131,7 +131,7 @@ protected:
     bool eventFilter(QObject *obj, QEvent *event) override;
 
 signals:
-    void requestRobocopyStart(const QString& dvdPath);
+    void requestSequentialRobocopyStart(const QString& dvdPath, const QStringList& orderedFiles);
 
 private slots:
     // Simplified framework integration slots
@@ -140,6 +140,7 @@ private slots:
     void onFrameRequested(int frameIndex);
     
     // DVD copy worker slots
+    void onWorkerReady();
     void onDvdDetected(const QString& dvdPath);
     void onCopyStarted();
     void onFileProgress(const QString& fileName, int progress);
@@ -403,6 +404,11 @@ private:
     // Background DVD detection and copy worker
     QThread* m_dvdWorkerThread;
     DvdCopyWorker* m_dvdWorker;
+    bool m_workerReady;           // Track if worker thread is ready to receive signals
+    
+    // Pending sequential copy data
+    QString m_pendingDvdPath;
+    QStringList m_pendingOrderedFiles;
     
     // Copy progress UI components
     QWidget* m_progressWidget;
@@ -434,6 +440,7 @@ private:
     void parseRobocopyOutput(const QString& output);
     qint64 getExpectedFileSize(const QString& filePath);
     bool hasActuallyMissingFiles();
+    QStringList getOrderedFileList();
     
     // Background DVD worker methods
     void initializeDvdWorker();

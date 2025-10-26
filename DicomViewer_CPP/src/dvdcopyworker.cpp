@@ -22,7 +22,8 @@ void debugLog(const QString& message) {
 }
 
 DvdCopyWorker::DvdCopyWorker(const QString& destPath, QObject* parent)
-    : QObject(parent), m_destPath(destPath), m_robocopyProcess(nullptr), m_progressTimer(nullptr), m_lastLogPosition(0)
+    : QObject(parent), m_destPath(destPath), m_robocopyProcess(nullptr), m_progressTimer(nullptr), m_lastLogPosition(0),
+      m_currentFileIndex(0)
 {
     debugLog("=== DVD Copy Worker Initialized ===");
     debugLog("Destination Path: " + m_destPath);
@@ -38,11 +39,18 @@ DvdCopyWorker::~DvdCopyWorker()
 #ifdef ENABLE_DVD_COPY_LOGGING
     qCDebug(dvdCopy) << "=== DVD Copy Worker Destroyed ===";
 #endif
-    if (m_robocopyProcess) {
+    if (m_robocopyProcess && m_robocopyProcess->state() == QProcess::Running) {
 #ifdef ENABLE_DVD_COPY_LOGGING
-        qCDebug(dvdCopy) << "Terminating active robocopy process...";
+        qCDebug(dvdCopy) << "Waiting for active robocopy process to complete...";
 #endif
-        m_robocopyProcess->kill();
+        // Try to terminate gracefully first
+        m_robocopyProcess->terminate();
+        if (!m_robocopyProcess->waitForFinished(3000)) {
+            // If it doesn't finish in 3 seconds, force kill
+            qCDebug(dvdCopy) << "Force killing robocopy process";
+            m_robocopyProcess->kill();
+            m_robocopyProcess->waitForFinished(1000);
+        }
         m_robocopyProcess->deleteLater();
     }
 }
@@ -65,9 +73,8 @@ void DvdCopyWorker::startDvdDetectionAndCopy()
     debugLog("SUCCESS: DVD detected at: " + dvdPath);
     emit dvdDetected(dvdPath);
     
-    // Step 2: Start robocopy
-    debugLog("Step 2: Starting robocopy process...");
-    startRobocopy(dvdPath);
+    // DVD detected successfully - main application will decide which copy method to use
+    debugLog("DVD detection complete. Waiting for copy method selection...");
 }
 
 void DvdCopyWorker::onRobocopyOutput()
@@ -562,4 +569,225 @@ void DvdCopyWorker::checkFileProgress()
             m_progressTimer->stop();
         }
     }
+}
+
+void DvdCopyWorker::startSequentialRobocopy(const QString& dvdPath, const QStringList& orderedFiles)
+{
+    qDebug() << "[SEQUENTIAL COPY] Starting sequential copy with" << orderedFiles.size() << "files";
+    qDebug() << "[SEQUENTIAL COPY] DVD Path:" << dvdPath;
+    qDebug() << "[SEQUENTIAL COPY] Method called successfully!";
+    
+    // CRITICAL: Stop any existing robocopy process to prevent conflicts
+    if (m_robocopyProcess && m_robocopyProcess->state() == QProcess::Running) {
+        qDebug() << "[SEQUENTIAL COPY] Stopping existing robocopy process for sequential copying";
+        debugLog("Stopping bulk robocopy to start sequential copying");
+        
+        m_robocopyProcess->terminate();
+        if (!m_robocopyProcess->waitForFinished(3000)) {
+            m_robocopyProcess->kill();
+            m_robocopyProcess->waitForFinished(1000);
+        }
+        
+        // Clean up existing process
+        if (m_robocopyProcess) {
+            m_robocopyProcess->deleteLater();
+            m_robocopyProcess = nullptr;
+        }
+    }
+    
+    m_dvdSourcePath = dvdPath;
+    m_filesToCopy = orderedFiles;
+    m_currentFileIndex = 0;
+    m_completedFiles.clear();
+    
+    debugLog("=== Sequential Robocopy Operation ===");
+    debugLog("Source Directory: " + dvdPath + "/DicomFiles");
+    debugLog("Destination Directory: " + m_destPath);
+    debugLog(QString("Files to copy: %1").arg(orderedFiles.size()));
+    
+    // Log first few files for verification
+    for (int i = 0; i < qMin(5, orderedFiles.size()); i++) {
+        debugLog(QString("File %1: %2").arg(i+1).arg(orderedFiles[i]));
+    }
+    
+    if (orderedFiles.isEmpty()) {
+        qDebug() << "[ERROR] No files to copy";
+        emit workerError("No files to copy");
+        return;
+    }
+    
+    // Create destination directory
+    bool dirCreated = QDir().mkpath(m_destPath);
+    debugLog("Destination directory created: " + QString(dirCreated ? "SUCCESS" : "FAILED"));
+    
+    // Start copying the first file
+    emit copyStarted();
+    copyNextFile();
+}
+
+void DvdCopyWorker::copyNextFile()
+{
+    qDebug() << "[COPY NEXT FILE] Method called - current index:" << m_currentFileIndex;
+    
+    // Safety checks
+    if (m_filesToCopy.isEmpty()) {
+        qDebug() << "[ERROR] copyNextFile called with empty file list";
+        emit workerError("No files to copy");
+        return;
+    }
+    
+    if (m_currentFileIndex >= m_filesToCopy.size()) {
+        // All files completed
+        debugLog("=== All files copied successfully ===");
+        emit copyCompleted(true);
+        return;
+    }
+    
+    if (m_currentFileIndex < 0) {
+        qDebug() << "[ERROR] Invalid file index:" << m_currentFileIndex;
+        emit workerError("Invalid file index");
+        return;
+    }
+    
+    QString fileName = m_filesToCopy[m_currentFileIndex];
+    m_currentFileName = fileName;
+    
+    // Emit overall progress
+    int overallPercent = (m_currentFileIndex * 100) / m_filesToCopy.size();
+    QString progressText = QString("File %1 of %2: %3")
+                          .arg(m_currentFileIndex + 1)
+                          .arg(m_filesToCopy.size())
+                          .arg(fileName);
+    
+    emit overallProgress(overallPercent, progressText);
+    
+    qDebug() << QString("[SEQUENTIAL] Copying file %1/%2: %3")
+                .arg(m_currentFileIndex + 1)
+                .arg(m_filesToCopy.size())
+                .arg(fileName);
+    
+    // Start copying this specific file
+    startSingleFileRobocopy(fileName);
+}
+
+void DvdCopyWorker::startSingleFileRobocopy(const QString& fileName)
+{
+    qDebug() << "[SINGLE FILE ROBOCOPY] Starting copy of:" << fileName;
+    
+    // Safety checks
+    if (fileName.isEmpty()) {
+        qDebug() << "[ERROR] startSingleFileRobocopy called with empty filename";
+        emit workerError("Empty filename provided for copy");
+        return;
+    }
+    
+    if (m_dvdSourcePath.isEmpty()) {
+        qDebug() << "[ERROR] DVD source path is empty";
+        emit workerError("DVD source path not set");
+        return;
+    }
+    
+    if (m_destPath.isEmpty()) {
+        qDebug() << "[ERROR] Destination path is empty";
+        emit workerError("Destination path not set");
+        return;
+    }
+    
+    QString sourceDir = m_dvdSourcePath + "/DicomFiles";
+    QString destDir = m_destPath;
+    
+    debugLog(QString("Starting copy of: %1").arg(fileName));
+    debugLog("Source: " + sourceDir);
+    debugLog("Dest: " + destDir);
+    
+    // Create new process for this file
+    if (m_robocopyProcess) {
+        m_robocopyProcess->deleteLater();
+    }
+    
+    m_robocopyProcess = new QProcess(this);
+    
+    connect(m_robocopyProcess, &QProcess::readyReadStandardOutput, 
+            this, &DvdCopyWorker::onRobocopyOutput);
+    connect(m_robocopyProcess, &QProcess::readyReadStandardError,
+            this, &DvdCopyWorker::onRobocopyError);
+    connect(m_robocopyProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this](int exitCode, QProcess::ExitStatus exitStatus) {
+                // Safety check - ensure object is still valid
+                if (!this || !m_robocopyProcess) {
+                    qDebug() << "[WARNING] Object destroyed during robocopy completion";
+                    return;
+                }
+                
+                // Handle single file completion
+                bool success = (exitCode == 0 || exitCode == 1);
+                
+                debugLog(QString("File copy finished: %1 (exit code: %2)").arg(m_currentFileName).arg(exitCode));
+                
+                if (success) {
+                    // Mark current file as 100% complete
+                    emit fileProgress(m_currentFileName, 100);
+                    m_completedFiles.append(m_currentFileName);
+                    
+                    // Move to next file
+                    m_currentFileIndex++;
+                    
+                    // Start next file after a short delay (helps with DVD drive)
+                    // Use QueuedConnection for safer threading
+                    QTimer::singleShot(100, this, [this]() {
+                        if (this) {  // Additional safety check
+                            copyNextFile();
+                        }
+                    });
+                } else {
+                    debugLog(QString("ERROR copying file: %1").arg(m_currentFileName));
+                    emit workerError(QString("Failed to copy file: %1").arg(m_currentFileName));
+                }
+                
+                // Clean up current process
+                if (m_robocopyProcess) {
+                    m_robocopyProcess->deleteLater();
+                    m_robocopyProcess = nullptr;
+                }
+            }, Qt::QueuedConnection);
+    
+    // Build robocopy command for single file
+    QStringList arguments;
+    arguments << sourceDir;      // Source directory (QProcess handles spaces automatically)
+    arguments << destDir;        // Destination directory (QProcess handles spaces automatically)  
+    arguments << fileName;       // Copy only this specific file (QProcess handles spaces automatically)
+    arguments << "/Z";                                 // Restartable mode
+    arguments << "/R:1";                               // 1 retry on failure
+    arguments << "/W:0";                               // 0 wait time between retries
+    arguments << "/V";                                 // Verbose output
+    
+#ifdef ENABLE_DVD_SPEED_THROTTLING
+    // Add bandwidth throttling for DVD compatibility
+    arguments << "/IoRate:1420K";    // ~1.4 MB/s (1x DVD speed)
+    arguments << "/IoMaxSize:128K";  // Use 128K I/O chunks
+    arguments << "/Threshold:64K";   // Only throttle files > 64K
+    
+    debugLog("DVD Speed Simulation: ~1.4MB/s (1x DVD speed)");
+#endif
+    
+    QString fullCommand = QString("robocopy %1").arg(arguments.join(" "));
+    debugLog("Command: \"" + fullCommand + "\"");
+    
+    // Emit initial progress for this file
+    emit fileProgress(fileName, 0);
+    
+    // Start the robocopy process
+    qDebug() << "[SINGLE FILE] Starting robocopy for:" << fileName;
+    m_robocopyProcess->start("robocopy", arguments);
+    
+    if (!m_robocopyProcess->waitForStarted(2000)) {
+        qDebug() << "[ERROR] Failed to start single file robocopy:" << m_robocopyProcess->errorString();
+        emit workerError("Failed to start robocopy for file: " + fileName);
+    }
+}
+
+void DvdCopyWorker::emitWorkerReady()
+{
+    qDebug() << "[WORKER READY] DvdCopyWorker is ready to receive signals";
+    emit workerReady();
 }

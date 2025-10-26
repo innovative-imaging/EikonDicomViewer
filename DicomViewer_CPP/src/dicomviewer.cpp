@@ -282,6 +282,7 @@ DicomViewer::DicomViewer(QWidget *parent)
     , m_dvdDetectionInProgress(false)
     , m_completedFiles()
     , m_fullyCompletedFiles()
+    , m_workerReady(false)
     , m_progressWidget(nullptr)
     , m_progressLabel(nullptr)
     , m_progressBar(nullptr)
@@ -575,17 +576,22 @@ void DicomViewer::initializeDvdWorker()
     // Initialize DVD worker thread and worker object
     m_dvdWorkerThread = new QThread(this);
     m_dvdWorker = new DvdCopyWorker(m_localDestPath);
+    m_workerReady = false;  // Reset worker ready state
     
     // Move worker to thread
     m_dvdWorker->moveToThread(m_dvdWorkerThread);
     
     // Connect thread signals
     connect(m_dvdWorkerThread, &QThread::started, 
+            m_dvdWorker, &DvdCopyWorker::emitWorkerReady);
+    connect(m_dvdWorkerThread, &QThread::started, 
             m_dvdWorker, &DvdCopyWorker::startDvdDetectionAndCopy);
     connect(m_dvdWorkerThread, &QThread::finished, 
             m_dvdWorker, &QObject::deleteLater);
     
     // Connect worker signals to main thread slots
+    connect(m_dvdWorker, &DvdCopyWorker::workerReady,
+            this, &DicomViewer::onWorkerReady);
     connect(m_dvdWorker, &DvdCopyWorker::dvdDetected, 
             this, &DicomViewer::onDvdDetected);
     connect(m_dvdWorker, &DvdCopyWorker::copyStarted, 
@@ -603,11 +609,11 @@ void DicomViewer::initializeDvdWorker()
                 qDebug() << "DVD Worker Status:" << status;
             });
     
-    // Connect signal to start robocopy on worker thread
-    bool connected = connect(this, &DicomViewer::requestRobocopyStart, 
-                            m_dvdWorker, &DvdCopyWorker::startRobocopy, 
-                            Qt::QueuedConnection);
-    qDebug() << "[DVD WORKER] Signal connection established:" << (connected ? "SUCCESS" : "FAILED");
+    // Connect signal for sequential robocopy (only method used)
+    bool seqConnected = connect(this, &DicomViewer::requestSequentialRobocopyStart,
+                               m_dvdWorker, &DvdCopyWorker::startSequentialRobocopy,
+                               Qt::QueuedConnection);
+    qDebug() << "[DVD WORKER] Sequential robocopy signal connection established:" << (seqConnected ? "SUCCESS" : "FAILED");
 }
 
 void DicomViewer::createToolbars()
@@ -2043,8 +2049,12 @@ void DicomViewer::loadDicomDir(const QString& dicomdirPath)
         // Populate tree widget using DicomReader
         m_dicomReader->populateTreeWidget(m_dicomTree);
         
+        qDebug() << "[LOAD DICOMDIR] Tree populated, about to call detectAndStartDvdCopy()";
+        
         // Start DVD detection and copy if needed
         detectAndStartDvdCopy();
+        
+        qDebug() << "[LOAD DICOMDIR] detectAndStartDvdCopy() completed";
         
         // Expand first level items and select first image if available
         expandFirstItems();
@@ -4822,8 +4832,11 @@ qint64 DicomViewer::getExpectedFileSize(const QString& filePath)
 
 bool DicomViewer::hasActuallyMissingFiles()
 {
+    qDebug() << "[MISSING FILES CHECK] Function called";
+    
     // Check if we have loaded a DICOM tree and if any files are actually missing
     if (!m_dicomReader || !m_dicomTree) {
+        qDebug() << "[MISSING FILES CHECK] No DICOM reader or tree available";
         return false;
     }
     
@@ -4854,11 +4867,71 @@ bool DicomViewer::hasActuallyMissingFiles()
     
     // Only consider it "missing files" if we have a significant number missing
     // This avoids triggering DVD copy for just a few missing files
-    return missingCount > 0 && (missingCount > totalCount * 0.1 || missingCount > 5);
+    bool result = missingCount > 0 && (missingCount > totalCount * 0.1 || missingCount > 5);
+    qDebug() << "[MISSING FILES CHECK] Result:" << result << "- Missing:" << missingCount << "Total:" << totalCount;
+    return result;
+}
+
+QStringList DicomViewer::getOrderedFileList()
+{
+    QStringList orderedFiles;
+    
+    if (!m_dicomTree) {
+        qDebug() << "[ERROR] No DICOM tree available for ordered file list";
+        return orderedFiles;
+    }
+    
+    // Safety check - ensure tree has items
+    if (m_dicomTree->topLevelItemCount() == 0) {
+        qDebug() << "[WARNING] DICOM tree is empty";
+        return orderedFiles;
+    }
+    
+    qDebug() << "Extracting ordered file list from tree view...";
+    
+    // Walk through tree in display order (top to bottom) to get files as they appear to user
+    QTreeWidgetItemIterator it(m_dicomTree);
+    int itemCount = 0;
+    
+    while (*it) {
+        QTreeWidgetItem* item = *it;
+        
+        // Safety check for null item
+        if (!item) {
+            ++it;
+            continue;
+        }
+        
+        itemCount++;
+        
+        // Check if this item represents an image (not patient/study/series headers)
+        QVariantList userData = item->data(0, Qt::UserRole).toList();
+        if (userData.size() >= 2) {
+            QString itemType = userData[0].toString();
+            QString filePath = userData[1].toString();
+            
+            if (itemType == "image") {
+                // Extract just the filename from the full path for robocopy
+                QFileInfo fileInfo(filePath);
+                QString fileName = fileInfo.fileName();
+                
+                if (!fileName.isEmpty()) {
+                    orderedFiles.append(fileName);
+                    qDebug() << QString("[ORDERED FILE %1] %2").arg(orderedFiles.size()).arg(fileName);
+                }
+            }
+        }
+        ++it;
+    }
+    
+    qDebug() << QString("Extracted %1 files from tree view in display order").arg(orderedFiles.size());
+    return orderedFiles;
 }
 
 void DicomViewer::detectAndStartDvdCopy()
 {
+    qDebug() << "[DVD DETECTION] detectAndStartDvdCopy() called";
+    
     // Prevent multiple simultaneous detection operations
     if (m_dvdDetectionInProgress) {
         qDebug() << "[DVD DETECTION] Already in progress, skipping duplicate request";
@@ -4903,32 +4976,8 @@ void DicomViewer::detectAndStartDvdCopy()
         qDebug() << "[DVD WORKER] Worker thread started successfully";
     }
     
-    // Try direct detection first for faster feedback
-    QString dvdPath = findDvdWithDicomFiles();
-    if (!dvdPath.isEmpty()) {
-        qDebug() << "[DVD FOUND] DVD with DICOM files detected at:" << dvdPath;
-        qDebug() << "[DVD COPY] Using DvdCopyWorker for direct copy operation...";
-        
-        // Use DvdCopyWorker for consistent behavior via proper thread communication
-        if (m_dvdWorker) {
-            // Emit DVD detected signal for UI updates
-            emit m_dvdWorker->dvdDetected(dvdPath);
-            
-            // Use signal/slot mechanism for thread-safe communication
-            qDebug() << "[DVD COPY] Emitting requestRobocopyStart signal for path:" << dvdPath;
-            emit requestRobocopyStart(dvdPath);
-            qDebug() << "[DVD COPY] Signal emitted successfully";
-        } else {
-            qDebug() << "[ERROR] DVD worker not initialized for direct copy";
-        }
-        
-        // Return early since we found the DVD and started the copy
-        return;
-    } else {
-        qDebug() << "[DVD SEARCH] No DVD with DicomFiles found in common drives";
-        qDebug() << "[DVD SEARCH] Checked drives: D:, E:, F:, G:, H:";
-        qDebug() << "[DVD WORKER] Worker thread already running, will continue extended search...";
-    }
+    // Worker thread will handle all DVD detection and copying
+    qDebug() << "[DVD DETECTION] Letting worker thread handle DVD detection and copying...";
 }
 
 
@@ -4989,10 +5038,60 @@ QString DicomViewer::findDvdWithDicomFiles()
 
 
 // DVD Worker Slot Implementations
+void DicomViewer::onWorkerReady()
+{
+    qDebug() << "[WORKER READY] DVD worker thread is ready";
+    m_workerReady = true;
+    
+    // If we have pending sequential copy data, start it now
+    if (!m_pendingDvdPath.isEmpty() && !m_pendingOrderedFiles.isEmpty()) {
+        qDebug() << "[PENDING COPY] Starting pending sequential copy for:" << m_pendingDvdPath;
+        qDebug() << "[PENDING COPY] Files to copy:" << m_pendingOrderedFiles.size();
+        
+        emit requestSequentialRobocopyStart(m_pendingDvdPath, m_pendingOrderedFiles);
+        
+        // Clear pending data
+        m_pendingDvdPath.clear();
+        m_pendingOrderedFiles.clear();
+    } else {
+        qDebug() << "[WORKER READY] No pending copy data";
+    }
+}
+
 void DicomViewer::onDvdDetected(const QString& dvdPath)
 {
     qDebug() << "DVD detected at:" << dvdPath;
     m_dvdSourcePath = dvdPath;
+    
+    // Clear any previous completion tracking to start fresh
+    qDebug() << "[INIT DEBUG] Clearing completed files set at DVD detection";
+    m_fullyCompletedFiles.clear();
+    
+    // Get ordered file list from tree view for sequential copying
+    QStringList orderedFiles = getOrderedFileList();
+    
+    if (!orderedFiles.isEmpty()) {
+        qDebug() << "[SEQUENTIAL COPY] Storing sequential copy data for path:" << dvdPath;
+        qDebug() << "[SEQUENTIAL COPY] Files to copy in order:" << orderedFiles.size();
+        
+        m_pendingDvdPath = dvdPath;
+        m_pendingOrderedFiles = orderedFiles;
+        
+        // Check if worker is already ready - if so, start immediately
+        if (m_workerReady) {
+            qDebug() << "[IMMEDIATE START] Worker is ready, starting sequential copy immediately";
+            emit requestSequentialRobocopyStart(m_pendingDvdPath, m_pendingOrderedFiles);
+            
+            // Clear pending data since we started immediately
+            m_pendingDvdPath.clear();
+            m_pendingOrderedFiles.clear();
+        } else {
+            qDebug() << "[SEQUENTIAL COPY] Worker not ready yet, waiting for worker ready signal";
+        }
+    } else {
+        qDebug() << "[WARNING] No ordered files found in tree view - DVD copying may not work properly";
+        qDebug() << "[INFO] Ensure DICOMDIR is loaded and tree view is populated before DVD detection";
+    }
     
     if (m_imageLabel) {
         m_imageLabel->setText("DVD detected. Starting copy...");
@@ -5005,6 +5104,27 @@ void DicomViewer::onCopyStarted()
     m_copyInProgress = true;
     m_currentCopyProgress = 0;
     m_dvdDetectionInProgress = false;  // Reset detection flag when copy starts
+    
+    // Ensure completed files set is clear at copy start
+    qDebug() << "[COPY START DEBUG] Completed files count before clear:" << m_fullyCompletedFiles.size();
+    m_fullyCompletedFiles.clear();
+    qDebug() << "[COPY START DEBUG] Completed files set cleared";
+    
+    // Debug: Check tree items one more time at copy start
+    if (m_dicomTree) {
+        QTreeWidgetItemIterator it(m_dicomTree);
+        int itemsWithProgress = 0;
+        while (*it) {
+            QTreeWidgetItem* item = *it;
+            QString itemText = item->text(0);
+            if (itemText.contains("%") || itemText.contains("Copying")) {
+                itemsWithProgress++;
+                qDebug() << "[COPY START DEBUG] Item with progress detected:" << itemText;
+            }
+            ++it;
+        }
+        qDebug() << "[COPY START DEBUG] Total items with progress indicators:" << itemsWithProgress;
+    }
     
     // Update status bar instead of blocking image display
     updateStatusBar("Loading from media...", 0);
@@ -5180,32 +5300,22 @@ void DicomViewer::updateSpecificTreeItemProgress(const QString& fileName, int pr
             }
             
             // Check if this item corresponds to the file being copied
-            // Try multiple matching strategies
+            // Use exact filename matching only for DICOM files
             bool isMatch = false;
             
             if ((itemType == "image" || itemType == "report")) {
-                // Strategy 1: Direct filename match
+                // Get the actual filename from the tree item's file path
                 QFileInfo filePathInfo(filePath);
-                QString baseFileName = filePathInfo.fileName();
-                if (baseFileName == fileName) {
-                    isMatch = true;
-                    qDebug() << "[MATCH] Direct filename match:" << fileName;
-                }
+                QString itemFileName = filePathInfo.fileName();
                 
-                // Strategy 2: Contains match (case insensitive)
-                if (!isMatch && filePath.contains(fileName, Qt::CaseInsensitive)) {
+                // CRITICAL: Use exact string comparison for DICOM filenames
+                // This prevents all files starting with "1.2.392..." from matching the same item
+                if (itemFileName == fileName) {
                     isMatch = true;
-                    qDebug() << "[MATCH] Contains match:" << fileName << "in" << filePath;
-                }
-                
-                // Strategy 3: Partial filename match (without extension)
-                if (!isMatch) {
-                    QString fileNameNoExt = QFileInfo(fileName).baseName();
-                    QString baseFileNameNoExt = QFileInfo(baseFileName).baseName();
-                    if (fileNameNoExt == baseFileNameNoExt) {
-                        isMatch = true;
-                        qDebug() << "[MATCH] Base name match:" << fileNameNoExt;
-                    }
+                    qDebug() << "[MATCH] Exact filename match:" << fileName << "vs" << itemFileName;
+                } else {
+                    // Debug mismatches to help troubleshoot
+                    qDebug() << "[NO MATCH]" << fileName << "!=" << itemFileName;
                 }
             }
             
@@ -5231,30 +5341,45 @@ void DicomViewer::updateSpecificTreeItemProgress(const QString& fileName, int pr
                     
                     qDebug() << "Updated tree item progress:" << fileName << progress << "%";
                 } else {
-                    // File completed - restore original text and icon
-                    item->setText(0, originalText);
-                    item->setForeground(0, QColor(0, 0, 0)); // Black text
+                    // File completed - verify it actually exists and is readable before marking complete
+                    QString fullFilePath = QFileInfo(filePath).absoluteFilePath();
+                    QFileInfo completedFile(fullFilePath);
                     
-                    // Set appropriate icon based on file type and actual frame count
-                    if (itemType == "report") {
-                        item->setIcon(0, QIcon(":/icons/List.png"));
-                    } else {
-                        // Get frame count from cached DICOM data instead of re-reading file
-                        DicomImageInfo imageInfo = m_dicomReader->getImageInfoForFile(fileName);
-                        int cachedFrameCount = imageInfo.frameCount;
+                    if (completedFile.exists() && completedFile.size() > 0) {
+                        qDebug() << "[FILE VERIFIED] File exists and has size:" << completedFile.size() << "bytes";
                         
-                        qDebug() << "[ICON SELECTION] File:" << fileName << "Cached Frames:" << cachedFrameCount << "Path:" << imageInfo.filePath;
+                        // File completed - restore original text and icon
+                        item->setText(0, originalText);
+                        item->setForeground(0, QColor(0, 0, 0)); // Black text
                         
-                        if (cachedFrameCount > 1) {
-                            item->setIcon(0, QIcon(":/icons/AcquisitionHeader.png"));
-                            qDebug() << "Set multiframe icon for" << fileName << "(" << cachedFrameCount << "frames)";
+                        // Set appropriate icon based on file type and actual frame count
+                        if (itemType == "report") {
+                            item->setIcon(0, QIcon(":/icons/List.png"));
                         } else {
-                            item->setIcon(0, QIcon(":/icons/Camera.png"));
-                            qDebug() << "Set single frame icon for" << fileName;
+                            // Get frame count from cached DICOM data instead of re-reading file
+                            DicomImageInfo imageInfo = m_dicomReader->getImageInfoForFile(fileName);
+                            int cachedFrameCount = imageInfo.frameCount;
+                            
+                            qDebug() << "[ICON SELECTION] File:" << fileName << "Cached Frames:" << cachedFrameCount << "Path:" << imageInfo.filePath;
+                            
+                            if (cachedFrameCount > 1) {
+                                item->setIcon(0, QIcon(":/icons/AcquisitionHeader.png"));
+                                qDebug() << "Set multiframe icon for" << fileName << "(" << cachedFrameCount << "frames)";
+                            } else {
+                                item->setIcon(0, QIcon(":/icons/Camera.png"));
+                                qDebug() << "Set single frame icon for" << fileName;
+                            }
                         }
+                        
+                        qDebug() << "File completed, restored original text:" << originalText;
+                    } else {
+                        qDebug() << "[FILE NOT READY] File" << fileName << "marked as 100% but doesn't exist or is empty. Keeping loading state.";
+                        // Keep the loading state - don't mark as complete yet
+                        QString progressText = QString("%1 - Finalizing...").arg(originalText);
+                        item->setText(0, progressText);
+                        item->setIcon(0, QIcon(":/icons/Loading.png"));
+                        item->setForeground(0, QColor(180, 180, 180));
                     }
-                    
-                    qDebug() << "File completed, restored original text:" << originalText;
                 }
                 break;
             }
@@ -5286,6 +5411,12 @@ void DicomViewer::parseRobocopyOutput(const QString& output)
             trimmedLine.contains("Dest :") ||
             trimmedLine.contains("Options :")) {
             qDebug() << "[ROBOCOPY]" << trimmedLine;
+        }
+        
+        // Skip files that robocopy reports as "same" (already exist and identical)
+        if (trimmedLine.contains("same\t\t")) {
+            qDebug() << "[ROBOCOPY SAME] Skipping file that already exists:" << trimmedLine;
+            continue;
         }
         
         // Look for file progress with enhanced parsing
@@ -5326,11 +5457,34 @@ void DicomViewer::parseRobocopyOutput(const QString& output)
                            .arg(filename.isEmpty() ? "processing..." : filename)
                            .arg(elapsed / 1000.0, 0, 'f', 1);
                 
+                // Debug any non-zero progress immediately
+                if (!filename.isEmpty() && progress > 0) {
+                    qDebug() << "[PROGRESS DEBUG] File progress detected:" << filename << progress << "% from line:" << trimmedLine;
+                    updateTreeItemWithProgress(filename, progress);
+                }
+                
                 if (progress >= 100) {
                     s_filesProcessed++;
                     qDebug() << QString("[DVD COPY] ✓ Completed file #%1: %2")
                                .arg(s_filesProcessed)
                                .arg(filename);
+                    
+                    // Additional debug: Track which files are being marked as complete and when
+                    qDebug() << "[100% DEBUG] File marked complete:" << filename;
+                    qDebug() << "[100% DEBUG] Robocopy line was:" << trimmedLine;
+                    
+                    // Verify file actually exists before marking as complete
+                    QString expectedPath = QString("C:/Users/gurup/AppData/Local/Temp/Ekn_TempData/DicomFiles/%1").arg(filename);
+                    QFileInfo checkFile(expectedPath);
+                    
+                    if (checkFile.exists() && checkFile.size() > 0) {
+                        qDebug() << "[VERIFICATION PASS] File exists with size:" << checkFile.size();
+                        updateTreeItemWithProgress(filename, progress);
+                    } else {
+                        qDebug() << "[VERIFICATION FAIL] File" << filename << "reported 100% but doesn't exist or is empty!";
+                        // Don't mark as complete yet - keep at 99%
+                        updateTreeItemWithProgress(filename, 99);
+                    }
                 }
             }
         }

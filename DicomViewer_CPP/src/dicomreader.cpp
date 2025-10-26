@@ -802,8 +802,21 @@ void DicomReader::refreshFileExistenceStatus()
             for (auto seriesIt = study.series.begin(); seriesIt != study.series.end(); ++seriesIt) {
                 DicomSeriesInfo& series = seriesIt.value();
                 for (DicomImageInfo& image : series.images) {
+                    bool wasExisting = image.fileExists;
+                    
                     // Update file existence status
                     image.fileExists = QFile::exists(image.filePath);
+                    
+                    // If file just became available, read actual frame count from the DICOM file
+                    if (image.fileExists && !wasExisting) {
+                        int actualFrameCount = getFrameCountFromFile(image.filePath);
+                        if (actualFrameCount > 0) {
+                            qDebug() << "[FRAME COUNT UPDATE]" << QFileInfo(image.filePath).fileName() 
+                                     << "- DICOMDIR frames:" << image.frameCount 
+                                     << "- Actual frames:" << actualFrameCount;
+                            image.frameCount = actualFrameCount;
+                        }
+                    }
                 }
             }
         }

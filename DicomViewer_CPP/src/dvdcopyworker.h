@@ -22,8 +22,11 @@ public:
 public slots:
     void startDvdDetectionAndCopy();
     void startRobocopy(const QString& dvdPath);
+    void startSequentialRobocopy(const QString& dvdPath, const QStringList& orderedFiles);
+    void emitWorkerReady();
 
 signals:
+    void workerReady();
     void dvdDetected(const QString& dvdPath);
     void copyStarted();
     void fileProgress(const QString& fileName, int progress);
@@ -44,6 +47,8 @@ private:
     QString findDvdWithDicomFiles();
     void parseRobocopyOutput(const QString& output);
     void startProgressMonitoring();
+    void copyNextFile();  // New method for sequential copying
+    void startSingleFileRobocopy(const QString& fileName);  // New method for single file copy
 
     QString m_destPath;
     QProcess* m_robocopyProcess;
@@ -53,6 +58,11 @@ private:
     QStringList m_completedFiles;
     QString m_logFilePath;
     qint64 m_lastLogPosition;
+    
+    // Sequential copying members
+    QStringList m_filesToCopy;    // Queue of files to copy in order
+    int m_currentFileIndex;       // Current file being copied (for progress)
+    QString m_dvdSourcePath;      // DVD source path for sequential copying
 };
 
 #endif // DVDCOPYWORKER_H
