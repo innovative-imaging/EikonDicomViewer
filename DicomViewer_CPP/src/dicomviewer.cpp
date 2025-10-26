@@ -287,6 +287,11 @@ DicomViewer::DicomViewer(QWidget *parent)
     , m_progressWidget(nullptr)
     , m_progressLabel(nullptr)
     , m_progressBar(nullptr)
+    , m_persistentSelectedStudyId("")
+    , m_persistentSelectedSeriesId("")
+    , m_persistentSelectedFileName("")
+    , m_persistentSelectedPath()
+    , m_selectionPersistenceEnabled(true)  // Enable selection persistence by default
     , m_statusBar(nullptr)
     , m_statusLabel(nullptr)
     , m_statusProgressBar(nullptr)
@@ -379,8 +384,16 @@ DicomViewer::DicomViewer(QWidget *parent)
             min-height: 20px;
         }
         QTreeWidget::item:selected {
-            background-color: #0078d7;
-            color: white;
+            background-color: #0078d7 !important;
+            color: white !important;
+        }
+        QTreeWidget::item:selected:!focus {
+            background-color: #0078d7 !important;
+            color: white !important;
+        }
+        QTreeWidget::item:selected:focus {
+            background-color: #0078d7 !important;
+            color: white !important;
         }
         QTreeWidget::item:hover {
             background-color: #404040;
@@ -1477,6 +1490,9 @@ void DicomViewer::onTreeItemSelected(QTreeWidgetItem *current, QTreeWidgetItem *
     if (!current) {
         return;
     }
+    
+    // Store current selection for persistence across tree refreshes
+    storeCurrentSelection();
     
     // Check what type of item this is
     QVariantList userData = current->data(0, Qt::UserRole).toList();
@@ -3518,6 +3534,52 @@ QTreeWidgetItem* DicomViewer::findLastSelectableChild(QTreeWidgetItem* parent)
     return nullptr;
 }
 
+QTreeWidgetItem* DicomViewer::findItemByPath(const QStringList& path)
+{
+    if (!m_dicomTree || path.isEmpty()) {
+        return nullptr;
+    }
+    
+    // Start from top level items
+    QTreeWidgetItem* currentItem = nullptr;
+    
+    // Find the root item (patient level)
+    for (int i = 0; i < m_dicomTree->topLevelItemCount(); ++i) {
+        QTreeWidgetItem* topItem = m_dicomTree->topLevelItem(i);
+        if (topItem->text(0) == path[0]) {
+            currentItem = topItem;
+            break;
+        }
+    }
+    
+    if (!currentItem) {
+        return nullptr;
+    }
+    
+    // Navigate down the path
+    for (int pathIndex = 1; pathIndex < path.size(); ++pathIndex) {
+        const QString& targetText = path[pathIndex];
+        QTreeWidgetItem* foundChild = nullptr;
+        
+        // Search through children
+        for (int childIndex = 0; childIndex < currentItem->childCount(); ++childIndex) {
+            QTreeWidgetItem* child = currentItem->child(childIndex);
+            if (child->text(0) == targetText) {
+                foundChild = child;
+                break;
+            }
+        }
+        
+        if (!foundChild) {
+            return nullptr;  // Path not found
+        }
+        
+        currentItem = foundChild;
+    }
+    
+    return currentItem;
+}
+
 void DicomViewer::performImageExport(const SaveImageDialog::ExportSettings& settings)
 {
     try {
@@ -4627,11 +4689,17 @@ void DicomViewer::onCopyProgressTimeout()
     if (m_copyInProgress && m_dicomReader) {
         qDebug() << "[PERIODIC REFRESH] Checking for newly available files...";
         
+        // Store current selection before tree refresh
+        storeCurrentSelection();
+        
         // Refresh file existence status in DicomReader
         m_dicomReader->refreshFileExistenceStatus();
         
         // Update the tree display to reflect new file availability
         m_dicomReader->populateTreeWidget(m_dicomTree);
+        
+        // Restore selection after tree refresh
+        restoreStoredSelection();
         
         // Update the header to show current progress
         int totalPatients = m_dicomReader->getTotalPatients();
@@ -5062,10 +5130,16 @@ void DicomViewer::onCopyCompleted(bool success)
         
         // Refresh DICOM tree to show newly copied files
         if (m_dicomReader) {
+            // Store current selection before tree refresh
+            storeCurrentSelection();
+            
             QString dicomdirPath = m_localDestPath + "/../DICOMDIR";
             if (QFile::exists(dicomdirPath)) {
                 m_dicomReader->loadDicomDir(dicomdirPath);
                 m_dicomReader->populateTreeWidget(m_dicomTree);
+                
+                // Restore selection after tree refresh
+                restoreStoredSelection();
             }
         }
         
@@ -5122,8 +5196,14 @@ void DicomViewer::updateTreeItemWithProgress(const QString& fileName, int progre
         // Update frame count for this specific file now that it's available
         m_dicomReader->updateFrameCountForFile(baseFileName);
         
+        // Store current selection using persistent selection system
+        storeCurrentSelection();
+        
         // Update the tree display to reflect new file availability with correct icons
         m_dicomReader->populateTreeWidget(m_dicomTree);
+        
+        // Restore selection using persistent selection system
+        restoreStoredSelection();
         
         qDebug() << "Tree refreshed after file completion with updated frame count:" << fileName;
         
@@ -5447,9 +5527,38 @@ void DicomViewer::autoSelectFirstCompletedImage()
                 parent = parent->parent();
             }
             
-            // Select the item - this will trigger onTreeItemSelected and load the image
+            // Multiple approaches to ensure selection is visible
+            qDebug() << "[AUTO SELECT] Attempting to select item with multiple methods...";
+            
+            // Method 1: Use selection model directly
+            QModelIndex index = m_dicomTree->indexFromItem(firstImage);
+            if (index.isValid()) {
+                m_dicomTree->selectionModel()->setCurrentIndex(index, QItemSelectionModel::ClearAndSelect);
+                qDebug() << "[AUTO SELECT] Selection model method applied";
+            }
+            
+            // Method 2: Traditional Qt selection
             m_dicomTree->setCurrentItem(firstImage);
-            m_dicomTree->scrollToItem(firstImage);
+            firstImage->setSelected(true);
+            
+            // Method 3: Force update and repaint
+            m_dicomTree->viewport()->update();
+            m_dicomTree->repaint();
+            
+            // Scroll to make it visible
+            m_dicomTree->scrollToItem(firstImage, QAbstractItemView::EnsureVisible);
+            
+            // Ensure tree has focus
+            m_dicomTree->setFocus(Qt::OtherFocusReason);
+            
+            // Store this auto-selection for persistence across tree refreshes
+            storeCurrentSelection();
+            
+            // Debug: Check if selection is actually set
+            QTreeWidgetItem* currentSelected = m_dicomTree->currentItem();
+            bool isSelected = firstImage->isSelected();
+            qDebug() << "[AUTO SELECT] Post-selection state - Current item:" << (currentSelected ? currentSelected->text(0) : "NULL");
+            qDebug() << "[AUTO SELECT] Post-selection state - Is selected:" << isSelected;
             
             // Mark that we've auto-selected the first image
             m_firstImageAutoSelected = true;
@@ -5460,6 +5569,126 @@ void DicomViewer::autoSelectFirstCompletedImage()
     }
     
     qDebug() << "[AUTO SELECT] No completed images found yet for auto-selection";
+}
+
+// ===== SELECTION PERSISTENCE METHODS =====
+
+void DicomViewer::storeCurrentSelection()
+{
+    if (!m_selectionPersistenceEnabled || !m_dicomTree) {
+        qDebug() << "[SELECTION PERSISTENCE] Disabled or no tree available";
+        return;
+    }
+    
+    QTreeWidgetItem* currentItem = m_dicomTree->currentItem();
+    if (!currentItem) {
+        qDebug() << "[SELECTION PERSISTENCE] No current selection to store";
+        m_persistentSelectedStudyId.clear();
+        m_persistentSelectedSeriesId.clear();
+        m_persistentSelectedFileName.clear();
+        m_persistentSelectedPath.clear();
+        return;
+    }
+    
+    // Store the path to the selected item for precise restoration
+    m_persistentSelectedPath = getItemPath(currentItem);
+    
+    // Also store specific identifiers for robustness
+    m_persistentSelectedFileName = currentItem->text(0);
+    
+    // If it's a child item (image), get parent identifiers
+    if (currentItem->parent()) {
+        if (currentItem->parent()->parent()) {
+            // It's an image item (grandchild), store study and series
+            m_persistentSelectedStudyId = currentItem->parent()->parent()->text(0);
+            m_persistentSelectedSeriesId = currentItem->parent()->text(0);
+        } else {
+            // It's a series item (child), store study
+            m_persistentSelectedStudyId = currentItem->parent()->text(0);
+            m_persistentSelectedSeriesId = currentItem->text(0);
+        }
+    } else {
+        // It's a study item (root)
+        m_persistentSelectedStudyId = currentItem->text(0);
+        m_persistentSelectedSeriesId.clear();
+    }
+    
+    qDebug() << "[SELECTION PERSISTENCE] Stored selection:";
+    qDebug() << "  Path:" << m_persistentSelectedPath;
+    qDebug() << "  Study ID:" << m_persistentSelectedStudyId;
+    qDebug() << "  Series ID:" << m_persistentSelectedSeriesId;
+    qDebug() << "  Filename:" << m_persistentSelectedFileName;
+}
+
+void DicomViewer::restoreStoredSelection()
+{
+    if (!m_selectionPersistenceEnabled || !m_dicomTree) {
+        qDebug() << "[SELECTION PERSISTENCE] Disabled or no tree available for restore";
+        return;
+    }
+    
+    if (m_persistentSelectedPath.isEmpty()) {
+        qDebug() << "[SELECTION PERSISTENCE] No stored selection to restore";
+        return;
+    }
+    
+    qDebug() << "[SELECTION PERSISTENCE] Attempting to restore selection:";
+    qDebug() << "  Path:" << m_persistentSelectedPath;
+    
+    // Try to find the item by its stored path
+    QTreeWidgetItem* targetItem = findItemByPath(m_persistentSelectedPath);
+    
+    if (targetItem) {
+        qDebug() << "[SELECTION PERSISTENCE] Found target item by path, applying triple selection method";
+        
+        // Triple selection method for maximum visibility
+        
+        // Method 1: QSelectionModel selection
+        QModelIndex index = m_dicomTree->indexFromItem(targetItem);
+        if (index.isValid()) {
+            m_dicomTree->selectionModel()->setCurrentIndex(
+                index, 
+                QItemSelectionModel::SelectCurrent | QItemSelectionModel::Clear
+            );
+            qDebug() << "[SELECTION PERSISTENCE] Applied QSelectionModel selection";
+        }
+        
+        // Method 2: Traditional setCurrentItem
+        m_dicomTree->setCurrentItem(targetItem);
+        qDebug() << "[SELECTION PERSISTENCE] Applied setCurrentItem";
+        
+        // Method 3: Ensure visibility and focus
+        m_dicomTree->scrollToItem(targetItem, QAbstractItemView::EnsureVisible);
+        m_dicomTree->setFocus();
+        
+        // Method 4: Force viewport update
+        m_dicomTree->viewport()->update();
+        
+        qDebug() << "[SELECTION PERSISTENCE] Successfully restored selection with enhanced visibility";
+        
+        // Verify selection was applied
+        QTreeWidgetItem* verifyItem = m_dicomTree->currentItem();
+        qDebug() << "[SELECTION PERSISTENCE] Verification - Current item:" 
+                 << (verifyItem ? verifyItem->text(0) : "NULL");
+                 
+    } else {
+        qDebug() << "[SELECTION PERSISTENCE] Could not find target item by path, selection lost";
+    }
+}
+
+QStringList DicomViewer::getItemPath(QTreeWidgetItem* item)
+{
+    QStringList path;
+    if (!item) return path;
+    
+    // Build path from root to item
+    QTreeWidgetItem* current = item;
+    while (current) {
+        path.prepend(current->text(0));
+        current = current->parent();
+    }
+    
+    return path;
 }
 
 #include "dicomviewer.moc"

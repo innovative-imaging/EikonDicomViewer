@@ -5,10 +5,10 @@
 #include <QTextStream>
 
 // Uncomment to enable DVD speed throttling (simulates real DVD/CD read speeds)
-#define ENABLE_DVD_SPEED_THROTTLING
+////#define ENABLE_DVD_SPEED_THROTTLING
 
 // Uncomment to enable verbose console logging
-#define ENABLE_DVD_COPY_LOGGING
+////#define ENABLE_DVD_COPY_LOGGING
 
 Q_LOGGING_CATEGORY(dvdCopy, "dvd.copy")
 

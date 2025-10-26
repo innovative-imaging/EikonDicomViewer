@@ -523,80 +523,32 @@ bool CopyDicomDir() {
     }
 }
 
-bool StartRobocopy() {
-    LogMessage(L"INFO", L"Starting robocopy for DicomFiles");
-    UpdateStatus(L"Copying DICOM files");
-    
-    wstring sourceDir = g_sourceDir + L"\\DicomFiles";
-    wstring destDir = g_tempDir + L"\\DicomFiles";
-    
-    if (!DirectoryExists(sourceDir)) {
-        LogMessage(L"WARNING", L"DicomFiles directory not found at " + sourceDir);
-        return false;
-    }
-    
-    // Build robocopy command
-    wstring robocopyCmd = L"robocopy \"" + sourceDir + L"\" \"" + destDir + 
-                         L"\" /E /R:3 /W:1 /LOG+:\"" + g_logFile + L"\"";
-    
-    // Create a mutable copy for CreateProcess
-    vector<wchar_t> cmdBuffer(robocopyCmd.begin(), robocopyCmd.end());
-    cmdBuffer.push_back(L'\0');
-    
-    // Start robocopy in background
-    STARTUPINFO si = { sizeof(si) };
-    PROCESS_INFORMATION pi = {};
-    
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    
-    if (CreateProcess(NULL, cmdBuffer.data(), NULL, NULL, 
-                     FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-        LogMessage(L"INFO", L"Robocopy started successfully");
-        return true;
-    }
-    
-    LogMessage(L"ERROR", L"Failed to start robocopy");
-    return false;
-}
-
 bool CopyFfmpegExe() {
-    LogMessage(L"INFO", L"Starting ffmpeg.exe copy with robocopy");
+    LogMessage(L"INFO", L"Starting ffmpeg.exe copy (async)");
     
     wstring sourcePath = g_sourceDir + L"\\ffmpeg.exe";
     
     if (!FileExists(sourcePath)) {
-        LogMessage(L"ERROR", L"ffmpeg.exe not found at " + sourcePath);
-        return false;
-    }
-    
-    // Build robocopy command for single file copy
-    wstring robocopyCmd = L"robocopy \"" + g_sourceDir + L"\" \"" + g_tempDir + 
-                         L"\" ffmpeg.exe /R:3 /W:1 /LOG+:\"" + g_logFile + L"\"";
-    
-    // Create a mutable copy for CreateProcess
-    vector<wchar_t> cmdBuffer(robocopyCmd.begin(), robocopyCmd.end());
-    cmdBuffer.push_back(L'\0');
-    
-    // Start robocopy in background (async)
-    STARTUPINFO si = { sizeof(si) };
-    PROCESS_INFORMATION pi = {};
-    
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    
-    if (CreateProcess(NULL, cmdBuffer.data(), NULL, NULL, 
-                     FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-        // Don't wait - let robocopy run asynchronously
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-        LogMessage(L"INFO", L"ffmpeg.exe robocopy started successfully (async)");
+        LogMessage(L"WARNING", L"ffmpeg.exe not found at " + sourcePath + L" - skipping copy");
         return true;
     }
     
-    LogMessage(L"ERROR", L"Failed to start ffmpeg.exe robocopy");
+    wstring destPath = g_tempDir + L"\\ffmpeg.exe";
+    
+    // Use simple copy command instead of robocopy
+    wstring copyCmd = L"cmd.exe /c start /b cmd.exe /c copy /Y \"" + sourcePath + L"\" \"" + destPath + L"\"";
+    
+    LogMessage(L"INFO", L"Executing command: " + copyCmd);
+    
+    PROCESS_INFORMATION pi = {};
+    
+    if (SafeCreateProcess(copyCmd, pi, false, 0)) {
+        SafeCloseProcessHandles(pi);
+        LogMessage(L"INFO", L"ffmpeg.exe copy started successfully (async)");
+        return true;
+    }
+    
+    LogMessage(L"ERROR", L"Failed to start copy command");
     return false;
 }
 

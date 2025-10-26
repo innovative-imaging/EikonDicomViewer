@@ -41,8 +41,9 @@ int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
     
-    // Allocate console for debug output in Windows
+    // Allocate console for debug output in Windows (Debug builds only)
 #ifdef _WIN32
+#ifdef _DEBUG
     if (AllocConsole()) {
         freopen_s((FILE**)stdout, "CONOUT$", "w", stdout);
         freopen_s((FILE**)stderr, "CONOUT$", "w", stderr);
@@ -61,6 +62,7 @@ int main(int argc, char *argv[])
         std::cout << "=== EikonDicomViewer Debug Console Initialized ===" << std::endl;
         qDebug() << "Qt Debug output test - console is working!";
     }
+#endif
 #endif
     
     // Set application properties
