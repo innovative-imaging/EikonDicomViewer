@@ -3452,7 +3452,7 @@ void DicomViewer::selectFirstImageItem()
     
     for (int i = 0; i < m_dicomTree->topLevelItemCount(); i++) {
         QTreeWidgetItem* topItem = m_dicomTree->topLevelItem(i);
-        QTreeWidgetItem* firstItem = findFirstSelectableChild(topItem);
+        QTreeWidgetItem* firstItem = findFirstImageChild(topItem);
         if (firstItem) {
             m_dicomTree->setCurrentItem(firstItem);
             m_dicomTree->scrollToItem(firstItem);
@@ -3489,6 +3489,19 @@ bool DicomViewer::isSelectableItem(QTreeWidgetItem* item)
     return false;
 }
 
+bool DicomViewer::isImageItem(QTreeWidgetItem* item)
+{
+    if (!item) return false;
+    
+    QVariantList userData = item->data(0, Qt::UserRole).toList();
+    if (userData.size() >= 2) {
+        QString type = userData[0].toString();
+        // Only allow selection of actual image items (not series)
+        return (type == "image");
+    }
+    return false;
+}
+
 QTreeWidgetItem* DicomViewer::findFirstSelectableChild(QTreeWidgetItem* parent)
 {
     if (!parent) return nullptr;
@@ -3500,6 +3513,22 @@ QTreeWidgetItem* DicomViewer::findFirstSelectableChild(QTreeWidgetItem* parent)
         }
         // Recursively check children
         QTreeWidgetItem* grandchild = findFirstSelectableChild(child);
+        if (grandchild) return grandchild;
+    }
+    return nullptr;
+}
+
+QTreeWidgetItem* DicomViewer::findFirstImageChild(QTreeWidgetItem* parent)
+{
+    if (!parent) return nullptr;
+    
+    for (int i = 0; i < parent->childCount(); i++) {
+        QTreeWidgetItem* child = parent->child(i);
+        if (isImageItem(child)) {
+            return child;
+        }
+        // Recursively check children for image items
+        QTreeWidgetItem* grandchild = findFirstImageChild(child);
         if (grandchild) return grandchild;
     }
     return nullptr;
@@ -5068,8 +5097,69 @@ void DicomViewer::onCopyCompleted(bool success)
         if (m_dicomReader) {
             QString dicomdirPath = m_localDestPath + "/../DICOMDIR";
             if (QFile::exists(dicomdirPath)) {
+                // Store current selection before repopulating tree
+                QTreeWidgetItem* currentSelection = m_dicomTree->currentItem();
+                QString selectedFilePath;
+                bool wasImageSelected = false;
+                if (currentSelection) {
+                    QVariantList userData = currentSelection->data(0, Qt::UserRole).toList();
+                    if (userData.size() >= 2) {
+                        QString type = userData[0].toString();
+                        selectedFilePath = userData[1].toString();
+                        wasImageSelected = (type == "image");
+                    }
+                }
+                
                 m_dicomReader->loadDicomDir(dicomdirPath);
                 m_dicomReader->populateTreeWidget(m_dicomTree);
+                
+                // Temporarily disconnect the selection signal to avoid reloading
+                disconnect(m_dicomTree, &QTreeWidget::currentItemChanged,
+                          this, &DicomViewer::onTreeItemSelected);
+                
+                // Restore user selection or select first image if no user selection
+                bool selectionRestored = false;
+                if (!selectedFilePath.isEmpty()) {
+                    // Try to find and select the previously selected item
+                    QTreeWidgetItemIterator it(m_dicomTree);
+                    while (*it) {
+                        QVariantList itemData = (*it)->data(0, Qt::UserRole).toList();
+                        if (itemData.size() >= 2) {
+                            QString itemPath = itemData[1].toString();
+                            QString itemType = itemData[0].toString();
+                            
+                            // If we had an image selected, only restore to same image
+                            // If we had a series selected, restore to same series or first image in series
+                            if (itemPath == selectedFilePath) {
+                                if (wasImageSelected && itemType == "image") {
+                                    m_dicomTree->setCurrentItem(*it);
+                                    selectionRestored = true;
+                                    break;
+                                } else if (!wasImageSelected && itemType == "series") {
+                                    // User had series selected, but now select first image in that series
+                                    QTreeWidgetItem* firstImage = findFirstImageChild(*it);
+                                    if (firstImage) {
+                                        m_dicomTree->setCurrentItem(firstImage);
+                                    } else {
+                                        m_dicomTree->setCurrentItem(*it);
+                                    }
+                                    selectionRestored = true;
+                                    break;
+                                }
+                            }
+                        }
+                        ++it;
+                    }
+                }
+                
+                // If no previous selection or couldn't restore it, select first image
+                if (!selectionRestored) {
+                    selectFirstImageItem();
+                }
+                
+                // Reconnect the selection signal for future user interactions
+                connect(m_dicomTree, &QTreeWidget::currentItemChanged,
+                        this, &DicomViewer::onTreeItemSelected);
             }
         }
         

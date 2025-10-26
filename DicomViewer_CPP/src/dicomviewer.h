@@ -277,7 +277,9 @@ private:
     void selectFirstImageItem();
     void selectLastImageItem();
     bool isSelectableItem(QTreeWidgetItem* item);
+    bool isImageItem(QTreeWidgetItem* item);
     QTreeWidgetItem* findFirstSelectableChild(QTreeWidgetItem* parent);
+    QTreeWidgetItem* findFirstImageChild(QTreeWidgetItem* parent);
     QTreeWidgetItem* findLastSelectableChild(QTreeWidgetItem* parent);
     
     // DICOM metadata methods
