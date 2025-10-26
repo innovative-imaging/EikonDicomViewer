@@ -147,6 +147,8 @@ private slots:
     void onOverallProgress(int percentage, const QString& statusText);
     void onCopyCompleted(bool success);
     void onWorkerError(const QString& error);
+    void onFfmpegCopyStarted();
+    void onFfmpegCopyCompleted(bool success);
     
     // Essential input handler slots
     void onPlayPauseRequested();
@@ -277,12 +279,6 @@ private:
     bool isSelectableItem(QTreeWidgetItem* item);
     QTreeWidgetItem* findFirstSelectableChild(QTreeWidgetItem* parent);
     QTreeWidgetItem* findLastSelectableChild(QTreeWidgetItem* parent);
-    QTreeWidgetItem* findItemByPath(const QStringList& path);
-    
-    // Selection persistence methods for tree refresh operations
-    void storeCurrentSelection();
-    void restoreStoredSelection();
-    QStringList getItemPath(QTreeWidgetItem* item);
     
     // DICOM metadata methods
     void extractDicomMetadata(const QString& filePath);
@@ -421,13 +417,6 @@ private:
     QWidget* m_progressWidget;
     QLabel* m_progressLabel;
     QProgressBar* m_progressBar;
-    
-    // Selection persistence for tree refresh operations
-    QString m_persistentSelectedStudyId;     // Store study ID for selection persistence
-    QString m_persistentSelectedSeriesId;    // Store series ID for selection persistence  
-    QString m_persistentSelectedFileName;    // Store filename for selection persistence
-    QStringList m_persistentSelectedPath;    // Full path for precise restoration
-    bool m_selectionPersistenceEnabled;      // Enable/disable selection persistence
     
     // Status bar components
     QStatusBar* m_statusBar;

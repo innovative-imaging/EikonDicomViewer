@@ -23,7 +23,7 @@ void debugLog(const QString& message) {
 
 DvdCopyWorker::DvdCopyWorker(const QString& destPath, QObject* parent)
     : QObject(parent), m_destPath(destPath), m_robocopyProcess(nullptr), m_progressTimer(nullptr), m_lastLogPosition(0),
-      m_currentFileIndex(0)
+      m_currentFileIndex(0), m_ffmpegCopyProcess(nullptr)
 {
     debugLog("=== DVD Copy Worker Initialized ===");
     debugLog("Destination Path: " + m_destPath);
@@ -52,6 +52,18 @@ DvdCopyWorker::~DvdCopyWorker()
             m_robocopyProcess->waitForFinished(1000);
         }
         m_robocopyProcess->deleteLater();
+    }
+    
+    if (m_ffmpegCopyProcess && m_ffmpegCopyProcess->state() == QProcess::Running) {
+#ifdef ENABLE_DVD_COPY_LOGGING
+        qCDebug(dvdCopy) << "Waiting for active ffmpeg copy process to complete...";
+#endif
+        m_ffmpegCopyProcess->terminate();
+        if (!m_ffmpegCopyProcess->waitForFinished(30000)) {
+            m_ffmpegCopyProcess->kill();
+            m_ffmpegCopyProcess->waitForFinished(30000);
+        }
+        m_ffmpegCopyProcess->deleteLater();
     }
 }
 
@@ -154,12 +166,19 @@ void DvdCopyWorker::onRobocopyFinished(int exitCode, QProcess::ExitStatus exitSt
 #endif
     
     qDebug() << "DVD Robocopy finished with exit code:" << exitCode;
-    emit copyCompleted(success);
     
     if (m_robocopyProcess) {
         m_robocopyProcess->deleteLater();
         m_robocopyProcess = nullptr;
     }
+    
+    // If robocopy was successful, start ffmpeg copy asynchronously
+    if (success) {
+        debugLog("Robocopy completed successfully - starting ffmpeg copy");
+        startFfmpegCopy();
+    }
+    
+    emit copyCompleted(success);
 }
 
 QString DvdCopyWorker::findDvdWithDicomFiles()
@@ -639,7 +658,9 @@ void DvdCopyWorker::copyNextFile()
     if (m_currentFileIndex >= m_filesToCopy.size()) {
         // All files completed
         debugLog("=== All files copied successfully ===");
-        emit copyCompleted(true);
+        debugLog("Sequential robocopy completed successfully - starting ffmpeg copy");
+        startFfmpegCopy();
+        // Note: copyCompleted will be emitted after ffmpeg copy completes
         return;
     }
     
@@ -791,3 +812,131 @@ void DvdCopyWorker::emitWorkerReady()
     qDebug() << "[WORKER READY] DvdCopyWorker is ready to receive signals";
     emit workerReady();
 }
+
+void DvdCopyWorker::startFfmpegCopy()
+{
+    debugLog("=== Starting FFmpeg Copy Operation (Internal - Not Shown to User) ===");
+    debugLog("DVD Source Path: " + m_dvdSourcePath);
+    debugLog("Destination Path: " + m_destPath);
+    
+    // Determine the source path for ffmpeg.exe - it's always in DVD root, never in DICOMFiles
+    QString ffmpegSourcePath;
+    
+    if (!m_dvdSourcePath.isEmpty()) {
+        // Use the DVD source path from sequential copy - ffmpeg.exe is in DVD root
+        ffmpegSourcePath = m_dvdSourcePath + "/ffmpeg.exe";
+        debugLog("Using DVD source path for ffmpeg: " + ffmpegSourcePath);
+    } else {
+        // Fallback: try to detect DVD path
+        QString dvdPath = findDvdWithDicomFiles();
+        if (!dvdPath.isEmpty()) {
+            ffmpegSourcePath = dvdPath + "/ffmpeg.exe";
+            debugLog("Using detected DVD path for ffmpeg: " + ffmpegSourcePath);
+        } else {
+            debugLog("Could not detect DVD path");
+        }
+    }
+    
+    if (ffmpegSourcePath.isEmpty()) {
+        debugLog("WARNING: Could not determine DVD path for ffmpeg copy");
+        emit ffmpegCopyCompleted(false);
+        emit copyCompleted(true);  // Still complete robocopy even if ffmpeg fails
+        return;
+    }
+    
+    debugLog("Checking for ffmpeg.exe at: " + ffmpegSourcePath);
+    
+    // Check if ffmpeg.exe exists on the DVD root
+    if (!QFile::exists(ffmpegSourcePath)) {
+        debugLog("INFO: ffmpeg.exe not found on DVD root - skipping copy (this is normal if DVD doesn't include ffmpeg)");
+        debugLog("Source path checked: " + ffmpegSourcePath);
+        emit ffmpegCopyCompleted(true); // Not an error, just not available
+        emit copyCompleted(true);  // Complete robocopy even without ffmpeg
+        return;
+    }
+    
+    // Determine destination path - FFmpeg should be in root temp directory, NOT in DICOMFiles
+    // m_destPath points to DicomFiles directory, so we need to go up one level for ffmpeg
+    QString ffmpegDestPath = QDir(m_destPath).absoluteFilePath("../ffmpeg.exe");
+    QString logFile = QDir(m_destPath).absoluteFilePath("../ffmpeg_copy.log");
+    
+    debugLog("FFmpeg source: " + ffmpegSourcePath);
+    debugLog("FFmpeg destination: " + ffmpegDestPath);
+    debugLog("FFmpeg copy log: " + logFile);
+    debugLog("DICOM files destination (m_destPath): " + m_destPath);
+    debugLog("FFmpeg will be copied to root temp directory, not DicomFiles subdirectory");
+    
+    // Check if ffmpeg already exists at destination
+    if (QFile::exists(ffmpegDestPath)) {
+        debugLog("INFO: ffmpeg.exe already exists at destination - skipping copy");
+        emit ffmpegCopyCompleted(true);
+        emit copyCompleted(true);  // Complete robocopy even if ffmpeg already exists
+        return;
+    }
+    
+    // Use simpler synchronous copy for debugging - we can make it async later if needed
+    debugLog("Attempting FFmpeg copy using QFile::copy()");
+    
+    // Try direct Qt copy first - simpler and more reliable
+    bool copySuccess = QFile::copy(ffmpegSourcePath, ffmpegDestPath);
+    
+    if (copySuccess) {
+        debugLog("SUCCESS: FFmpeg copied successfully using QFile::copy");
+        emit ffmpegCopyCompleted(true);
+        emit copyCompleted(true);
+        return;
+    } else {
+        debugLog("QFile::copy failed, trying Windows copy command as fallback");
+        
+        // Fallback to Windows copy command
+        QString copyCmd = QString("copy /Y \"%1\" \"%2\"")
+                         .arg(QDir::toNativeSeparators(ffmpegSourcePath))
+                         .arg(QDir::toNativeSeparators(ffmpegDestPath));
+        
+        debugLog("FFmpeg fallback copy command: " + copyCmd);
+    
+        emit ffmpegCopyStarted();
+        
+        // Create process for Windows copy command
+        if (m_ffmpegCopyProcess) {
+            m_ffmpegCopyProcess->deleteLater();
+        }
+        
+        m_ffmpegCopyProcess = new QProcess(this);
+        
+        // Connect process signals
+        connect(m_ffmpegCopyProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, [this, ffmpegDestPath](int exitCode, QProcess::ExitStatus exitStatus) {
+                    bool success = (exitCode == 0 && exitStatus == QProcess::NormalExit);
+                    
+                    debugLog(QString("FFmpeg copy command finished with exit code: %1").arg(exitCode));
+                    
+                    // Verify file was actually copied
+                    if (success && QFile::exists(ffmpegDestPath)) {
+                        debugLog("SUCCESS: FFmpeg copy completed and file exists at destination");
+                        emit ffmpegCopyCompleted(true);
+                    } else {
+                        debugLog("FAILED: FFmpeg copy failed or file doesn't exist at destination");
+                        emit ffmpegCopyCompleted(false);
+                    }
+                    
+                    emit copyCompleted(true); // Complete robocopy regardless
+                });
+        
+        // Start the copy command
+        debugLog("Starting Windows copy command for FFmpeg");
+        QStringList arguments;
+        arguments << "/c" << copyCmd;
+        
+        m_ffmpegCopyProcess->start("cmd.exe", arguments);
+        
+        if (!m_ffmpegCopyProcess->waitForStarted(2000)) {
+            debugLog("ERROR: Failed to start ffmpeg copy process: " + m_ffmpegCopyProcess->errorString());
+            emit ffmpegCopyCompleted(false);
+            emit copyCompleted(true);  // Complete robocopy even if ffmpeg fails to start
+        } else {
+            debugLog("FFmpeg copy process started successfully");
+        }
+    }
+}
+

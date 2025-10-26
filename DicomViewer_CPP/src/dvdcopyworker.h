@@ -34,6 +34,8 @@ signals:
     void copyCompleted(bool success);
     void workerError(const QString& error);
     void statusChanged(const QString& status);
+    void ffmpegCopyStarted();
+    void ffmpegCopyCompleted(bool success);
 
 private slots:
     void onRobocopyOutput();
@@ -49,6 +51,7 @@ private:
     void startProgressMonitoring();
     void copyNextFile();  // New method for sequential copying
     void startSingleFileRobocopy(const QString& fileName);  // New method for single file copy
+    void startFfmpegCopy();  // Internal method for ffmpeg copy after robocopy
 
     QString m_destPath;
     QProcess* m_robocopyProcess;
@@ -63,6 +66,9 @@ private:
     QStringList m_filesToCopy;    // Queue of files to copy in order
     int m_currentFileIndex;       // Current file being copied (for progress)
     QString m_dvdSourcePath;      // DVD source path for sequential copying
+    
+    // FFmpeg copying members
+    QProcess* m_ffmpegCopyProcess;  // Process for copying ffmpeg.exe
 };
 
 #endif // DVDCOPYWORKER_H

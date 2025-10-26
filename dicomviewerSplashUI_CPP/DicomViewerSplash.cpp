@@ -1157,14 +1157,12 @@ void ExecutePipeline() {
         LogStepEnd(L"Launch Viewer", step4Success);
         
         if (step4Success) {
-            // Success! Kill the timeout timer and start background operations
+            // Success! Kill the timeout timer 
             KillTimer(g_hMainWnd, ID_TIMEOUT_TIMER);
             
-                 
-            // Step 5: Copy ffmpeg.exe using robocopy (background)
-            LogStepStart(L"Start ffmpeg Copy");
-            bool step5Success = CopyFfmpegExe();
-            LogStepEnd(L"Start ffmpeg Copy", step5Success);
+            // Note: ffmpeg.exe copy is now handled by DicomViewer after DICOM files are complete
+            // to prevent I/O contention on the DVD drive during critical operations
+            LogMessage(L"INFO", L"ffmpeg.exe copy deferred to DicomViewer for optimal I/O performance");
             
             // Log pipeline completion
             auto pipelineEnd = chrono::steady_clock::now();
