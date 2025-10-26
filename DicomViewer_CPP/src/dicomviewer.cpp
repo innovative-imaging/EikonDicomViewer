@@ -443,6 +443,48 @@ DicomViewer::DicomViewer(QWidget *parent)
         mainLayout->addWidget(m_leftSidebar);
     }
     
+    // Step 2.5: Create DICOM Info Panel (between tree and main content like Python version)
+    m_dicomInfoWidget = new QFrame;
+    m_dicomInfoWidget->setObjectName("dicom_info_panel"); 
+    m_dicomInfoWidget->setFixedWidth(400);  // Same as Python version
+    m_dicomInfoWidget->setStyleSheet("QFrame#dicom_info_panel { background-color: #2a2a2a; border-right: 1px solid #666; }");
+    m_dicomInfoWidget->hide();  // Initially hidden like Python
+    
+    QVBoxLayout* dicomInfoLayout = new QVBoxLayout(m_dicomInfoWidget);
+    dicomInfoLayout->setContentsMargins(0, 0, 0, 0);
+    dicomInfoLayout->setSpacing(0);
+    
+    // Header with title (like Python)
+    QVBoxLayout* headerLayout = new QVBoxLayout;
+    headerLayout->setContentsMargins(5, 5, 5, 5);
+    
+    QLabel* titleLabel = new QLabel("DICOM Tags");
+    titleLabel->setStyleSheet("color: white; font-weight: bold; font-size: 14px; padding: 5px;");
+    headerLayout->addWidget(titleLabel);
+    
+    dicomInfoLayout->addLayout(headerLayout);
+    
+    // DICOM info text area
+    m_dicomInfoTextEdit = new QTextEdit;
+    m_dicomInfoTextEdit->setObjectName("dicom_info_text");
+    m_dicomInfoTextEdit->setReadOnly(true);
+    m_dicomInfoTextEdit->setStyleSheet(R"(
+        QTextEdit {
+            background-color: #2b2b2b;
+            color: white;
+            border: 1px solid #666666;
+            padding: 2px;
+            selection-background-color: #0078d4;
+        }
+    )");
+    dicomInfoLayout->addWidget(m_dicomInfoTextEdit);
+    
+    // Add DICOM info widget to main layout
+    mainLayout->addWidget(m_dicomInfoWidget);
+    
+    // Debug: Confirm widget creation
+    qDebug() << "[DICOM INFO] DICOM info widget created successfully in constructor. Widget pointer:" << m_dicomInfoWidget;
+    
     // Step 3: Main content area with stacked widget
     m_mainStack = new QStackedWidget;
     
@@ -511,9 +553,6 @@ DicomViewer::DicomViewer(QWidget *parent)
     
     // Step 5: Create status bar
     createStatusBar();
-    
-    // Step 6: Create DICOM info panel
-    createDicomInfoPanel();
     
     // Step 7: Initialize DVD worker thread first
     initializeDvdWorker();
@@ -790,6 +829,44 @@ void DicomViewer::createCentralWidget()
     
     sidebarLayout->addWidget(m_dicomTree);
     mainLayout->addWidget(m_leftSidebar);
+    
+    // Create DICOM Info Panel (like Python version - between tree and main content)
+    m_dicomInfoWidget = new QFrame;
+    m_dicomInfoWidget->setObjectName("dicom_info_panel"); 
+    m_dicomInfoWidget->setFixedWidth(400);  // Same as Python version
+    m_dicomInfoWidget->setStyleSheet("QFrame#dicom_info_panel { background-color: #2a2a2a; border-right: 1px solid #666; }");
+    m_dicomInfoWidget->hide();  // Initially hidden like Python
+    
+    QVBoxLayout* dicomInfoLayout = new QVBoxLayout(m_dicomInfoWidget);
+    dicomInfoLayout->setContentsMargins(0, 0, 0, 0);
+    dicomInfoLayout->setSpacing(0);
+    
+    // Header with title (like Python)
+    QVBoxLayout* headerLayout = new QVBoxLayout;
+    headerLayout->setContentsMargins(5, 5, 5, 5);
+    
+    QLabel* titleLabel = new QLabel("DICOM Tags");
+    titleLabel->setStyleSheet("color: white; font-weight: bold; font-size: 14px; padding: 5px;");
+    headerLayout->addWidget(titleLabel);
+    
+    dicomInfoLayout->addLayout(headerLayout);
+    
+    // DICOM info text area
+    m_dicomInfoTextEdit = new QTextEdit;
+    m_dicomInfoTextEdit->setObjectName("dicom_info_text");
+    m_dicomInfoTextEdit->setReadOnly(true);
+    m_dicomInfoTextEdit->setStyleSheet(R"(
+        QTextEdit {
+            background-color: #2b2b2b;
+            color: white;
+            border: 1px solid #666666;
+            padding: 2px;
+            selection-background-color: #0078d4;
+        }
+    )");
+    dicomInfoLayout->addWidget(m_dicomInfoTextEdit);
+    
+    mainLayout->addWidget(m_dicomInfoWidget);
     
     // Main content area (stacked widget)
     m_mainStack = new QStackedWidget;
@@ -4341,106 +4418,7 @@ QString DicomViewer::formatFilterInfo(const QString& filterData, int indent)
     return indentStr + "Filter: " + filterData;
 }
 
-void DicomViewer::createDicomInfoPanel()
-{
-    // Create the DICOM info panel widget (initially hidden)
-    m_dicomInfoWidget = new QWidget(this);
-    m_dicomInfoWidget->setObjectName("dicom_info_panel");
-    
-    // Set up the layout
-    QVBoxLayout* layout = new QVBoxLayout(m_dicomInfoWidget);
-    layout->setContentsMargins(10, 10, 10, 10);
-    
-    // Create title bar with close button
-    QWidget* titleBar = new QWidget(m_dicomInfoWidget);
-    QHBoxLayout* titleLayout = new QHBoxLayout(titleBar);
-    titleLayout->setContentsMargins(5, 5, 5, 5);
-    
-    QLabel* titleLabel = new QLabel("DICOM Information", titleBar);
-    titleLabel->setStyleSheet(R"(
-        QLabel {
-            font-size: 16px;
-            font-weight: bold;
-            color: white;
-            padding: 0px;
-        }
-    )");
-    titleLayout->addWidget(titleLabel);
-    
-    // Add close button
-    QPushButton* closeBtn = new QPushButton("×", titleBar);
-    closeBtn->setFixedSize(24, 24);
-    closeBtn->setStyleSheet(R"(
-        QPushButton {
-            background-color: #606060;
-            border: 1px solid #808080;
-            color: white;
-            font-size: 16px;
-            font-weight: bold;
-            border-radius: 2px;
-        }
-        QPushButton:hover {
-            background-color: #707070;
-        }
-        QPushButton:pressed {
-            background-color: #505050;
-        }
-    )");
-    connect(closeBtn, &QPushButton::clicked, this, &DicomViewer::toggleDicomInfo);
-    titleLayout->addWidget(closeBtn);
-    
-    // Style the title bar
-    titleBar->setStyleSheet(R"(
-        QWidget {
-            background-color: #404040;
-            border: 1px solid #666666;
-        }
-    )");
-    
-    layout->addWidget(titleBar);
-    
-    // Create text edit for DICOM info
-    m_dicomInfoTextEdit = new QTextEdit(m_dicomInfoWidget);
-    m_dicomInfoTextEdit->setReadOnly(true);
-    m_dicomInfoTextEdit->setAcceptRichText(true); // Enable HTML rendering
-    m_dicomInfoTextEdit->setStyleSheet(R"(
-        QTextEdit {
-            background-color: #2b2b2b;
-            color: white;
-            border: 1px solid #666666;
-            padding: 2px;
-            selection-background-color: #0078d4;
-        }
-        QScrollBar:vertical {
-            background-color: #404040;
-            width: 16px;
-            border: none;
-            margin: 0;
-        }
-        QScrollBar::handle:vertical {
-            background-color: #606060;
-            border-radius: 8px;
-            min-height: 20px;
-        }
-        QScrollBar::handle:vertical:hover {
-            background-color: #707070;
-        }
-        QScrollBar::add-line:vertical,
-        QScrollBar::sub-line:vertical {
-            border: none;
-            background: none;
-        }
-        QScrollBar::up-arrow:vertical,
-        QScrollBar::down-arrow:vertical {
-            background: none;
-        }
-    )");
-    layout->addWidget(m_dicomInfoTextEdit);
-    
-    // Initially hide the panel
-    m_dicomInfoWidget->hide();
-    m_dicomInfoVisible = false;
-}
+
 
 void DicomViewer::createStatusBar()
 {
@@ -4502,44 +4480,34 @@ void DicomViewer::updateStatusBar(const QString& message, int progress)
 
 void DicomViewer::toggleDicomInfo()
 {
+    qDebug() << "[DICOM INFO] toggleDicomInfo() called";
+    
     if (!m_dicomInfoWidget) {
-        // If widget doesn't exist, create it now
-        createDicomInfoPanel();
-        if (!m_dicomInfoWidget) {
-            return; // Still failed to create
-        }
+        qDebug() << "[DICOM INFO] ERROR: m_dicomInfoWidget is null!";
+        return; // Widget should always exist now that it's created in layout
     }
     
     m_dicomInfoVisible = !m_dicomInfoVisible;
+    qDebug() << "[DICOM INFO] Toggled to visible:" << m_dicomInfoVisible;
     
     if (m_dicomInfoVisible) {
-        // Show the panel - position it on the right side of the screen
-        const QRect screenRect = geometry();
-        const int panelWidth = 400;
-        const int panelHeight = screenRect.height() - 120; // Leave some margin
-        
-        m_dicomInfoWidget->setFixedSize(panelWidth, panelHeight);
-        m_dicomInfoWidget->move(screenRect.width() - panelWidth - 20, 80); // Position from right edge with more top margin
-        
-        // Ensure widget is properly configured for display
-        m_dicomInfoWidget->setWindowFlags(Qt::Tool | Qt::WindowStaysOnTopHint);
-        m_dicomInfoWidget->setAttribute(Qt::WA_ShowWithoutActivating, false);
-        
+        // Show the panel (it's now inline in the layout like Python version)
         // Populate with current image info if available
         if (!m_currentImagePath.isEmpty()) {
             populateDicomInfo(m_currentImagePath);
         } else {
             // Show default message if no image is loaded
             if (m_dicomInfoTextEdit) {
-                m_dicomInfoTextEdit->setHtml("<h3>DICOM Information</h3><p>No image loaded. Please load a DICOM image to view its metadata.</p>");
+                m_dicomInfoTextEdit->setHtml("<div style='text-align: center; padding: 20px; color: white; background-color: #2a2a2a;'>"
+                                           "<h3>DICOM Tags</h3><p>No image loaded. Please select a DICOM image to view its tags.</p></div>");
             }
         }
         
         m_dicomInfoWidget->show();
-        m_dicomInfoWidget->raise(); // Bring to front
-        m_dicomInfoWidget->activateWindow(); // Ensure it gets focus
+        qDebug() << "[DICOM INFO] Widget should now be visible. IsVisible:" << m_dicomInfoWidget->isVisible();
     } else {
         m_dicomInfoWidget->hide();
+        qDebug() << "[DICOM INFO] Widget hidden";
     }
 }
 
@@ -4565,179 +4533,77 @@ void DicomViewer::populateDicomInfo(const QString& filePath)
             return;
         }
         
-        // Helper lambda to extract string value
-        auto getStringValue = [&](const DcmTagKey& tag) -> QString {
-            OFString ofString;
-            if (dataset->findAndGetOFString(tag, ofString).good()) {
-                QString result = QString::fromLatin1(ofString.c_str());
-                return result.replace("^", " ").trimmed();
+        // Helper lambda to get VR-based color like Python version
+        auto getVRColor = [](const QString& vr) -> QString {
+            if (vr == "SQ") {
+                return "#6496FF";  // Sequences in blue (100, 150, 255)
+            } else if (vr == "UI" || vr == "SH" || vr == "LO" || vr == "ST" || vr == "LT" || vr == "UT" || vr == "CS" || vr == "PN") {
+                return "#96FF96";  // String types in light green (150, 255, 150) 
+            } else if (vr == "US" || vr == "SS" || vr == "UL" || vr == "SL" || vr == "FL" || vr == "FD" || vr == "DS" || vr == "IS") {
+                return "#FFFF96";  // Numeric types in yellow (255, 255, 150)
+            } else {
+                return "#FFFFFF";  // Default white (255, 255, 255)
             }
-            return "N/A";
         };
         
-        // Helper lambda to extract numeric value
-        auto getNumericValue = [&](const DcmTagKey& tag) -> QString {
-            OFString ofString;
-            if (dataset->findAndGetOFString(tag, ofString).good()) {
-                return QString::fromLatin1(ofString.c_str()).trimmed();
-            }
-            return "N/A";
-        };
-        
-        // Helper lambda to create formatted row with alternating colors
-        auto formatRow = [](const QString& label, const QString& value, bool isEven) -> QString {
-            QString bgColor = isEven ? "#353535" : "#2b2b2b"; // Alternating row colors
-            return QString("<div style='background-color: %1; padding: 2px 4px; margin: 0;'>"
-                          "<span style='color: #cccccc; font-weight: bold;'>%2:</span> "
-                          "<span style='color: white;'>%3</span>"
-                          "</div>").arg(bgColor, label, value);
-        };
-        
-        // Helper lambda to create section header
-        auto formatSectionHeader = [](const QString& title) -> QString {
-            return QString("<div style='background-color: #505050; color: #ffffff; "
-                          "font-weight: bold; padding: 6px 4px; margin: 8px 0 2px 0; "
-                          "border-left: 4px solid #0078d4;'>%1</div>").arg(title);
-        };
-        
-        QString htmlContent = "<html><body style='margin: 0; padding: 0; font-family: Consolas, \"Courier New\", monospace; font-size: 11px;'>";
-        
-        // Patient Information
-        htmlContent += formatSectionHeader("PATIENT INFORMATION");
-        int rowCount = 0;
-        htmlContent += formatRow("Patient Name", getStringValue(DCM_PatientName), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Patient ID", getStringValue(DCM_PatientID), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Patient Sex", getStringValue(DCM_PatientSex), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Patient Age", getStringValue(DCM_PatientAge), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Patient Birth Date", getStringValue(DCM_PatientBirthDate), rowCount++ % 2 == 0);
-        
-        // Study Information
-        htmlContent += formatSectionHeader("STUDY INFORMATION");
-        rowCount = 0; // Reset for each section
-        htmlContent += formatRow("Study Description", getStringValue(DCM_StudyDescription), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Study Date", getStringValue(DCM_StudyDate), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Study Time", getStringValue(DCM_StudyTime), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Study ID", getStringValue(DCM_StudyID), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Accession Number", getStringValue(DCM_AccessionNumber), rowCount++ % 2 == 0);
-        
-        // Series Information
-        htmlContent += formatSectionHeader("SERIES INFORMATION");
-        rowCount = 0;
-        htmlContent += formatRow("Series Description", getStringValue(DCM_SeriesDescription), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Series Number", getNumericValue(DCM_SeriesNumber), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Series Date", getStringValue(DCM_SeriesDate), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Series Time", getStringValue(DCM_SeriesTime), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Modality", getStringValue(DCM_Modality), rowCount++ % 2 == 0);
-        
-        // Image Information
-        htmlContent += formatSectionHeader("IMAGE INFORMATION");
-        rowCount = 0;
-        htmlContent += formatRow("Instance Number", getNumericValue(DCM_InstanceNumber), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Acquisition Date", getStringValue(DCM_AcquisitionDate), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Acquisition Time", getStringValue(DCM_AcquisitionTime), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Content Date", getStringValue(DCM_ContentDate), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Content Time", getStringValue(DCM_ContentTime), rowCount++ % 2 == 0);
-        
-        // Image dimensions
-        Uint16 rows = 0, cols = 0, bitsAllocated = 0, bitsStored = 0;
-        dataset->findAndGetUint16(DCM_Rows, rows);
-        dataset->findAndGetUint16(DCM_Columns, cols);
-        dataset->findAndGetUint16(DCM_BitsAllocated, bitsAllocated);
-        dataset->findAndGetUint16(DCM_BitsStored, bitsStored);
-        
-        htmlContent += formatRow("Image Size", QString("%1 x %2").arg(cols).arg(rows), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Bits Allocated", QString::number(bitsAllocated), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Bits Stored", QString::number(bitsStored), rowCount++ % 2 == 0);
-        
-        // Equipment Information
-        htmlContent += formatSectionHeader("EQUIPMENT INFORMATION");
-        rowCount = 0;
-        htmlContent += formatRow("Institution Name", getStringValue(DCM_InstitutionName), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Manufacturer", getStringValue(DCM_Manufacturer), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Manufacturer Model", getStringValue(DCM_ManufacturerModelName), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Station Name", getStringValue(DCM_StationName), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Software Version", getStringValue(DCM_SoftwareVersions), rowCount++ % 2 == 0);
-        
-        // Technical Parameters (if available)
-        htmlContent += formatSectionHeader("TECHNICAL PARAMETERS");
-        rowCount = 0;
-        htmlContent += formatRow("KVP", getNumericValue(DCM_KVP), rowCount++ % 2 == 0);
-        htmlContent += formatRow("X-ray Tube Current", getNumericValue(DCM_XRayTubeCurrent) + " mA", rowCount++ % 2 == 0);
-        htmlContent += formatRow("Exposure Time", getNumericValue(DCM_ExposureTime) + " ms", rowCount++ % 2 == 0);
-        htmlContent += formatRow("Filter Material", getStringValue(DCM_FilterMaterial), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Primary Angle", getNumericValue(DCM_PositionerPrimaryAngle) + "°", rowCount++ % 2 == 0);
-        htmlContent += formatRow("Secondary Angle", getNumericValue(DCM_PositionerSecondaryAngle) + "°", rowCount++ % 2 == 0);
-        
-        // Window/Level Information
-        htmlContent += formatSectionHeader("WINDOW/LEVEL");
-        rowCount = 0;
-        htmlContent += formatRow("Window Center", getNumericValue(DCM_WindowCenter), rowCount++ % 2 == 0);
-        htmlContent += formatRow("Window Width", getNumericValue(DCM_WindowWidth), rowCount++ % 2 == 0);
-        
-        // Multi-frame information
-        Sint32 numberOfFrames = 0;
-        if (dataset->findAndGetSint32(DCM_NumberOfFrames, numberOfFrames).good() && numberOfFrames > 1) {
-            htmlContent += formatSectionHeader("MULTI-FRAME INFORMATION");
-            rowCount = 0;
-            htmlContent += formatRow("Number of Frames", QString::number(numberOfFrames), rowCount++ % 2 == 0);
-            htmlContent += formatRow("Current Frame", QString::number(m_currentFrame + 1), rowCount++ % 2 == 0);
+        // Helper lambda to create DICOM tag row with VR-based coloring like Python
+        auto formatDicomTag = [&](DcmElement* elem) -> QString {
+            DcmTag tag = elem->getTag();
+            QString tagStr = QString("(%1,%2)").arg(tag.getGTag(), 4, 16, QChar('0')).arg(tag.getETag(), 4, 16, QChar('0')).toUpper();
+            DcmVR vr(elem->getVR());
+            QString vrStr = QString::fromLatin1(vr.getVRName());
+            QString color = getVRColor(vrStr);
             
-            // Frame time if available
-            OFString frameTime;
-            if (dataset->findAndGetOFString(DCM_FrameTime, frameTime).good()) {
-                htmlContent += formatRow("Frame Time", QString::fromLatin1(frameTime.c_str()) + " ms", rowCount++ % 2 == 0);
+            // Get tag name 
+            QString tagName = QString::fromLatin1(tag.getTagName());
+            if (tagName.isEmpty()) {
+                tagName = QString("Unknown Tag %1").arg(tagStr);
+            }
+            
+            // Get value
+            QString value;
+            OFString ofString;
+            if (elem->getOFString(ofString, 0).good()) {
+                value = QString::fromLatin1(ofString.c_str());
+                if (value.length() > 100) {
+                    value = value.left(97) + "...";
+                }
+            } else {
+                value = "[Empty]";
+            }
+            
+            return QString("<tr style='background-color: #2a2a2a;'>"
+                          "<td style='color: %1; font-family: Consolas, monospace; font-size: 10px; padding: 2px 6px; border: 1px solid #444;'>%2</td>"
+                          "<td style='color: %1; font-weight: bold; padding: 2px 6px; border: 1px solid #444;'>%3</td>"
+                          "<td style='color: %1; font-family: Consolas, monospace; font-size: 11px; padding: 2px 6px; border: 1px solid #444; word-break: break-all;'>%4</td>"
+                          "</tr>").arg(color, tagStr, tagName, value);
+        };
+        
+        QString htmlContent = "<html><body style='margin: 0; padding: 8px; background-color: #1e1e1e; font-family: \"Segoe UI\", Arial, sans-serif; font-size: 11px;'>";
+        
+        // Add professional title header like Python version
+        htmlContent += "<div style='text-align: center; background: linear-gradient(135deg, #0078d4, #005a9e); "
+                      "color: white; padding: 12px; margin: -8px -8px 16px -8px; border-radius: 0 0 8px 8px;'>"
+                      "<h2 style='margin: 0; font-size: 14px; font-weight: bold; letter-spacing: 1px;'>DICOM TAGS</h2>"
+                      "</div>";
+        
+        // Create table structure like Python version
+        htmlContent += "<table style='width: 100%; border-collapse: collapse; font-family: Consolas, monospace;'>";
+        htmlContent += "<tr style='background-color: #404040;'>"
+                      "<th style='color: white; font-weight: bold; padding: 6px; border: 1px solid #666; text-align: left; width: 80px;'>Group,Elem.</th>"
+                      "<th style='color: white; font-weight: bold; padding: 6px; border: 1px solid #666; text-align: left; width: 180px;'>TAG Description</th>"
+                      "<th style='color: white; font-weight: bold; padding: 6px; border: 1px solid #666; text-align: left;'>Value</th>"
+                      "</tr>";
+        
+        // Iterate through all DICOM elements like Python version
+        for (unsigned long i = 0; i < dataset->card(); i++) {
+            DcmElement* elem = dataset->getElement(i);
+            if (elem) {
+                htmlContent += formatDicomTag(elem);
             }
         }
         
-        // SOP Class and Transfer Syntax
-        htmlContent += formatSectionHeader("DICOM TECHNICAL INFO");
-        rowCount = 0;
-        htmlContent += formatRow("SOP Class UID", getStringValue(DCM_SOPClassUID), rowCount++ % 2 == 0);
-        htmlContent += formatRow("SOP Instance UID", getStringValue(DCM_SOPInstanceUID), rowCount++ % 2 == 0);
-        
-        // Try to get transfer syntax from meta header
-        DcmMetaInfo* metaInfo = fileFormat.getMetaInfo();
-        if (metaInfo) {
-            OFString transferSyntax;
-            if (metaInfo->findAndGetOFString(DCM_TransferSyntaxUID, transferSyntax).good()) {
-                htmlContent += formatRow("Transfer Syntax", QString::fromLatin1(transferSyntax.c_str()), rowCount++ % 2 == 0);
-            }
-        }
-        
-        // Additional Clinical Information (if available)
-        QString additionalInfo;
-        OFString tempString;
-        
-        // Body Part Examined
-        if (dataset->findAndGetOFString(DCM_BodyPartExamined, tempString).good()) {
-            additionalInfo += formatRow("Body Part Examined", QString::fromLatin1(tempString.c_str()), rowCount++ % 2 == 0);
-        }
-        
-        // View Position
-        if (dataset->findAndGetOFString(DCM_ViewPosition, tempString).good()) {
-            additionalInfo += formatRow("View Position", QString::fromLatin1(tempString.c_str()), rowCount++ % 2 == 0);
-        }
-        
-        // Laterality
-        if (dataset->findAndGetOFString(DCM_Laterality, tempString).good()) {
-            additionalInfo += formatRow("Laterality", QString::fromLatin1(tempString.c_str()), rowCount++ % 2 == 0);
-        }
-        
-        // Protocol Name
-        if (dataset->findAndGetOFString(DCM_ProtocolName, tempString).good()) {
-            additionalInfo += formatRow("Protocol Name", QString::fromLatin1(tempString.c_str()), rowCount++ % 2 == 0);
-        }
-        
-        // Performing Physician
-        if (dataset->findAndGetOFString(DCM_PerformingPhysicianName, tempString).good()) {
-            additionalInfo += formatRow("Performing Physician", QString::fromLatin1(tempString.c_str()).replace("^", " "), rowCount++ % 2 == 0);
-        }
-        
-        // If we have additional clinical info, add it as a section
-        if (!additionalInfo.isEmpty()) {
-            htmlContent += formatSectionHeader("CLINICAL INFORMATION");
-            htmlContent += additionalInfo;
-        }
+        htmlContent += "</table>";
         
         htmlContent += "</body></html>";
         
