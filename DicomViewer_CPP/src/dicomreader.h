@@ -77,6 +77,9 @@ public:
     
     // Get frame count from DICOM file
     int getFrameCountFromFile(const QString& filePath);
+    
+    // Update frame count for a specific file when it becomes available
+    void updateFrameCountForFile(const QString& fileName);
 
 private:
     QMap<QString, DicomPatientInfo> m_patients;

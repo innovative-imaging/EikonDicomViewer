@@ -409,6 +409,7 @@ private:
     // Pending sequential copy data
     QString m_pendingDvdPath;
     QStringList m_pendingOrderedFiles;
+    bool m_firstImageAutoSelected;  // Track if we've auto-selected the first completed image
     
     // Copy progress UI components
     QWidget* m_progressWidget;
@@ -446,6 +447,7 @@ private:
     void initializeDvdWorker();
     void updateTreeItemWithProgress(const QString& fileName, int progress);
     void updateSpecificTreeItemProgress(const QString& fileName, int progress);
+    void autoSelectFirstCompletedImage();  // Auto-select first completed image for better UX
     
     // RDSR (Radiation Dose Structured Report) methods
     void displayReport(const QString& filePath);

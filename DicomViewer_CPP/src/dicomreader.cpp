@@ -218,19 +218,24 @@ void DicomReader::populateTreeWidget(QTreeWidget* treeWidget)
                         imageItem->setData(0, Qt::UserRole, QVariantList() << "image" << image.filePath);
                     }
                     
-                    // Set icon based on file type, existence and frame count
+                    // Set icon based on file existence first, then file type and frame count
                     QString iconName;
                     QString tooltip;
                     
-                    if (!image.displayName.isEmpty() && image.displayName.startsWith("SR DOC")) {
-                        // This is a Structured Report document
+                    if (!image.fileExists) {
+                        // File doesn't exist yet - show loading icon for all file types
+                        iconName = "Loading.png";
+                        if (!image.displayName.isEmpty() && image.displayName.startsWith("SR DOC")) {
+                            tooltip = QString("Loading Structured Report (SR) Document\nFile is being copied from media...");
+                        } else {
+                            tooltip = QString("Loading %1\nFile is being copied from media...")
+                                     .arg(image.frameCount > 1 ? "multiframe image" : "DICOM image");
+                        }
+                        imageItem->setForeground(0, QColor(180, 180, 180)); // Gray out text
+                    } else if (!image.displayName.isEmpty() && image.displayName.startsWith("SR DOC")) {
+                        // This is a Structured Report document that exists
                         iconName = "List.png"; // Use document/list icon for SR
                         tooltip = "Structured Report (SR) Document";
-                    } else if (!image.fileExists) {
-                        iconName = "Loading.png"; // Fixed: was loading_96.png, now Loading.png
-                        tooltip = QString("Loading %1\nFile is being copied from media...")
-                                 .arg(image.frameCount > 1 ? "multiframe image" : "DICOM image");
-                        imageItem->setForeground(0, QColor(180, 180, 180)); // Gray out text
                     } else if (image.frameCount > 1) {
                         iconName = "AcquisitionHeader.png";
                         tooltip = QString("Multiframe DICOM image - %1 frames").arg(image.frameCount);
@@ -976,6 +981,46 @@ DicomImageInfo DicomReader::getImageInfoForFile(const QString& filePath) const
     defaultInfo.frameCount = 1;
     defaultInfo.fileExists = false;
     return defaultInfo;
+}
+
+void DicomReader::updateFrameCountForFile(const QString& fileName)
+{
+    qDebug() << "[FRAME COUNT UPDATE] Updating frame count for file:" << fileName;
+    
+    // Find the file in our data structures and update its frame count
+    for (auto& patient : m_patients) {
+        for (auto& study : patient.studies) {
+            for (auto& series : study.series) {
+                for (auto& image : series.images) {
+                    // Extract filename from full path to compare
+                    QString imageFileName = QFileInfo(image.filePath).fileName();
+                    
+                    if (imageFileName == fileName && image.fileExists) {
+                        qDebug() << "[FRAME COUNT UPDATE] Found matching image, reading actual frame count...";
+                        
+                        // Re-read the actual frame count from the now-available file
+                        int actualFrameCount = getFrameCountFromFile(image.filePath);
+                        
+                        if (actualFrameCount != image.frameCount) {
+                            qDebug() << QString("[FRAME COUNT UPDATE] Updated %1 from %2 to %3 frames")
+                                        .arg(fileName)
+                                        .arg(image.frameCount)
+                                        .arg(actualFrameCount);
+                            
+                            image.frameCount = actualFrameCount;
+                        } else {
+                            qDebug() << QString("[FRAME COUNT UPDATE] Frame count unchanged: %1 frames")
+                                        .arg(actualFrameCount);
+                        }
+                        
+                        return; // Found and updated, we're done
+                    }
+                }
+            }
+        }
+    }
+    
+    qDebug() << "[FRAME COUNT UPDATE] File not found in data structures:" << fileName;
 }
 
 #endif // HAVE_DCMTK

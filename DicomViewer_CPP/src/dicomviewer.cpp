@@ -283,6 +283,7 @@ DicomViewer::DicomViewer(QWidget *parent)
     , m_completedFiles()
     , m_fullyCompletedFiles()
     , m_workerReady(false)
+    , m_firstImageAutoSelected(false)
     , m_progressWidget(nullptr)
     , m_progressLabel(nullptr)
     , m_progressBar(nullptr)
@@ -4849,9 +4850,9 @@ bool DicomViewer::hasActuallyMissingFiles()
             QTreeWidgetItem* child = item->child(i);
             checkItemsRecursively(child);
             
-            // Check if this is an image item
+            // Check if this is a file item (image or report)
             QVariantList data = child->data(0, Qt::UserRole).toList();
-            if (data.size() >= 2 && data[0].toString() == "image") {
+            if (data.size() >= 2 && (data[0].toString() == "image" || data[0].toString() == "report")) {
                 totalCount++;
                 QString filePath = data[1].toString();
                 if (!QFile::exists(filePath)) {
@@ -4904,20 +4905,20 @@ QStringList DicomViewer::getOrderedFileList()
         
         itemCount++;
         
-        // Check if this item represents an image (not patient/study/series headers)
+        // Check if this item represents a file (image or report, not patient/study/series headers)
         QVariantList userData = item->data(0, Qt::UserRole).toList();
         if (userData.size() >= 2) {
             QString itemType = userData[0].toString();
             QString filePath = userData[1].toString();
             
-            if (itemType == "image") {
+            if (itemType == "image" || itemType == "report") {
                 // Extract just the filename from the full path for robocopy
                 QFileInfo fileInfo(filePath);
                 QString fileName = fileInfo.fileName();
                 
                 if (!fileName.isEmpty()) {
                     orderedFiles.append(fileName);
-                    qDebug() << QString("[ORDERED FILE %1] %2").arg(orderedFiles.size()).arg(fileName);
+                    qDebug() << QString("[ORDERED FILE %1] %2 (type: %3)").arg(orderedFiles.size()).arg(fileName).arg(itemType);
                 }
             }
         }
@@ -5066,6 +5067,7 @@ void DicomViewer::onDvdDetected(const QString& dvdPath)
     // Clear any previous completion tracking to start fresh
     qDebug() << "[INIT DEBUG] Clearing completed files set at DVD detection";
     m_fullyCompletedFiles.clear();
+    m_firstImageAutoSelected = false;  // Reset auto-selection flag for new session
     
     // Get ordered file list from tree view for sequential copying
     QStringList orderedFiles = getOrderedFileList();
@@ -5094,7 +5096,7 @@ void DicomViewer::onDvdDetected(const QString& dvdPath)
     }
     
     if (m_imageLabel) {
-        m_imageLabel->setText("DVD detected. Starting copy...");
+        m_imageLabel->setText("DVD detected. Loading...");
     }
 }
 
@@ -5117,7 +5119,7 @@ void DicomViewer::onCopyStarted()
         while (*it) {
             QTreeWidgetItem* item = *it;
             QString itemText = item->text(0);
-            if (itemText.contains("%") || itemText.contains("Copying")) {
+            if (itemText.contains("%") || itemText.contains("Loading")) {
                 itemsWithProgress++;
                 qDebug() << "[COPY START DEBUG] Item with progress detected:" << itemText;
             }
@@ -5140,7 +5142,7 @@ void DicomViewer::onFileProgress(const QString& fileName, int progress)
     m_currentCopyProgress = progress;
     
     // Update status bar instead of blocking image display
-    QString statusMessage = QString("Copying: %1 (%2%)")
+    QString statusMessage = QString("Loading: %1 (%2%)")
                            .arg(QFileInfo(fileName).fileName())
                            .arg(progress);
     updateStatusBar(statusMessage, progress);
@@ -5251,10 +5253,18 @@ void DicomViewer::updateTreeItemWithProgress(const QString& fileName, int progre
         // Refresh file existence status in DicomReader
         m_dicomReader->refreshFileExistenceStatus();
         
-        // Update the tree display to reflect new file availability
+        // Update frame count for this specific file now that it's available
+        m_dicomReader->updateFrameCountForFile(baseFileName);
+        
+        // Update the tree display to reflect new file availability with correct icons
         m_dicomReader->populateTreeWidget(m_dicomTree);
         
-        qDebug() << "Tree refreshed after file completion:" << fileName;
+        qDebug() << "Tree refreshed after file completion with updated frame count:" << fileName;
+        
+        // Auto-select and display the first completed image for better UX
+        if (!m_firstImageAutoSelected) {
+            autoSelectFirstCompletedImage();
+        }
         
         // Also update the header to show current progress
         int totalPatients = m_dicomReader->getTotalPatients();
@@ -5332,7 +5342,7 @@ void DicomViewer::updateSpecificTreeItemProgress(const QString& fileName, int pr
                 
                 if (progress < 100) {
                     // Show progress percentage in the item text
-                    QString progressText = QString("%1 - Copying... %2%").arg(originalText).arg(progress);
+                    QString progressText = QString("%1 - Loading... %2%").arg(originalText).arg(progress);
                     item->setText(0, progressText);
                     
                     // Keep the loading icon and gray color
@@ -5443,7 +5453,7 @@ void DicomViewer::parseRobocopyOutput(const QString& output)
                 
                 // Update status bar with progress
                 if (!filename.isEmpty()) {
-                    QString statusMessage = QString("Copying: %1 (%2%)")
+                    QString statusMessage = QString("Loading: %1 (%2%)")
                                            .arg(filename).arg(progress);
                     updateStatusBar(statusMessage, progress);
                 } else {
@@ -5521,6 +5531,69 @@ void DicomViewer::parseRobocopyOutput(const QString& output)
             qDebug() << "[ROBOCOPY ERROR]" << trimmedLine;
         }
     }
+}
+
+void DicomViewer::autoSelectFirstCompletedImage()
+{
+    if (!m_dicomTree || m_firstImageAutoSelected) {
+        return;
+    }
+    
+    qDebug() << "[AUTO SELECT] Looking for first completed image to auto-select...";
+    
+    // Recursive function to find the first DICOM image item (leaf node)
+    std::function<QTreeWidgetItem*(QTreeWidgetItem*)> findFirstImageItem = 
+        [&](QTreeWidgetItem* item) -> QTreeWidgetItem* {
+        
+        if (!item) return nullptr;
+        
+        // Check if this is a leaf item (DICOM image) by checking if it has no children
+        if (item->childCount() == 0) {
+            // Verify it's a DICOM file by checking if it has a Camera or AcquisitionHeader icon
+            QIcon itemIcon = item->icon(0);
+            if (!itemIcon.isNull()) {
+                qDebug() << QString("[AUTO SELECT] Found potential image item: %1").arg(item->text(0));
+                return item;
+            }
+        }
+        
+        // Recursively search children
+        for (int i = 0; i < item->childCount(); ++i) {
+            QTreeWidgetItem* result = findFirstImageItem(item->child(i));
+            if (result) {
+                return result;
+            }
+        }
+        
+        return nullptr;
+    };
+    
+    // Search from root level
+    for (int i = 0; i < m_dicomTree->topLevelItemCount(); ++i) {
+        QTreeWidgetItem* firstImage = findFirstImageItem(m_dicomTree->topLevelItem(i));
+        if (firstImage) {
+            qDebug() << QString("[AUTO SELECT] Auto-selecting first completed image: %1").arg(firstImage->text(0));
+            
+            // Expand parent items to make the selection visible
+            QTreeWidgetItem* parent = firstImage->parent();
+            while (parent) {
+                parent->setExpanded(true);
+                parent = parent->parent();
+            }
+            
+            // Select the item - this will trigger onTreeItemSelected and load the image
+            m_dicomTree->setCurrentItem(firstImage);
+            m_dicomTree->scrollToItem(firstImage);
+            
+            // Mark that we've auto-selected the first image
+            m_firstImageAutoSelected = true;
+            
+            qDebug() << "[AUTO SELECT] First image auto-selected and displayed!";
+            return;
+        }
+    }
+    
+    qDebug() << "[AUTO SELECT] No completed images found yet for auto-selection";
 }
 
 #include "dicomviewer.moc"
