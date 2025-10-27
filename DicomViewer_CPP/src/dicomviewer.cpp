@@ -648,10 +648,6 @@ void DicomViewer::initializeDvdWorker()
             this, [this](const QString& status) {
                 qDebug() << "DVD Worker Status:" << status;
             });
-    connect(m_dvdWorker, &DvdCopyWorker::ffmpegCopyStarted,
-            this, &DicomViewer::onFfmpegCopyStarted);
-    connect(m_dvdWorker, &DvdCopyWorker::ffmpegCopyCompleted,
-            this, &DicomViewer::onFfmpegCopyCompleted);
     
     // Connect signal for sequential robocopy (only method used)
     bool seqConnected = connect(this, &DicomViewer::requestSequentialRobocopyStart,
@@ -2194,6 +2190,53 @@ void DicomViewer::autoLoadDicomdir()
         // Keep the default message
         m_imageLabel->setText("Select a DICOMDIR file to begin.");
     }
+}
+
+QString DicomViewer::findFfmpegExecutable()
+{
+    // First, check if ffmpeg.exe is in the same directory as DicomViewer.exe
+    QString executablePath = QApplication::applicationDirPath();
+    QString localFfmpegPath = QDir(executablePath).absoluteFilePath("ffmpeg.exe");
+    
+    qDebug() << "Checking for ffmpeg.exe in executable directory:" << localFfmpegPath;
+    
+    if (QFile::exists(localFfmpegPath)) {
+        qDebug() << "Found ffmpeg.exe in local directory";
+        return localFfmpegPath;
+    }
+    
+    // If not found locally, check the DVD drive (if available)
+    if (!m_dvdSourcePath.isEmpty()) {
+        QString dvdFfmpegPath = m_dvdSourcePath + "/ffmpeg.exe";
+        
+        qDebug() << "Checking for ffmpeg.exe on DVD drive:" << dvdFfmpegPath;
+        
+        if (QFile::exists(dvdFfmpegPath)) {
+            qDebug() << "Found ffmpeg.exe on DVD drive";
+            return dvdFfmpegPath;
+        }
+    }
+    
+    // Fallback: try to detect DVD drives and check for ffmpeg
+    QStringList drivesToCheck = {"D:", "E:", "F:", "G:", "H:"};
+    
+    for (const QString& drive : drivesToCheck) {
+        QString driveFfmpegPath = drive + "/ffmpeg.exe";
+        
+        qDebug() << "Checking for ffmpeg.exe on drive:" << driveFfmpegPath;
+        
+        if (QFile::exists(driveFfmpegPath)) {
+            // Verify this is likely the DVD drive by checking for DicomFiles directory
+            QString dicomPath = drive + "/DicomFiles";
+            if (QDir(dicomPath).exists()) {
+                qDebug() << "Found ffmpeg.exe on DVD drive:" << driveFfmpegPath;
+                return driveFfmpegPath;
+            }
+        }
+    }
+    
+    qDebug() << "ffmpeg.exe not found in any location";
+    return QString(); // Return empty string if not found
 }
 
 void DicomViewer::expandFirstItems()
@@ -3749,12 +3792,23 @@ bool DicomViewer::createMP4Video(const QString& frameDir, const QString& outputP
 {
     // Use FFmpeg to create MP4 video from JPEG frames
     
-    // First, check if ffmpeg is available in the system PATH
+    // Find ffmpeg executable using our helper function
+    QString ffmpegPath = findFfmpegExecutable();
+    
+    if (ffmpegPath.isEmpty()) {
+        qDebug() << "FFmpeg executable not found in local directory or DVD drive";
+        return false;
+    }
+    
+    qDebug() << "Using FFmpeg executable at:" << ffmpegPath;
+    
+    // Test if ffmpeg executable is working
     QProcess testProcess;
-    testProcess.start("ffmpeg", QStringList() << "-version");
+    testProcess.start(ffmpegPath, QStringList() << "-version");
     testProcess.waitForFinished(3000); // Wait up to 3 seconds
     
     if (testProcess.exitCode() != 0) {
+        qDebug() << "FFmpeg executable test failed, exit code:" << testProcess.exitCode();
         return false;
     }
     
@@ -3771,27 +3825,33 @@ bool DicomViewer::createMP4Video(const QString& frameDir, const QString& outputP
     arguments << "-y";                          // Overwrite output file if it exists
     arguments << outputPath;
     
+    qDebug() << "FFmpeg command:" << ffmpegPath << arguments.join(" ");
     
     // Execute FFmpeg process
     QProcess ffmpegProcess;
-    ffmpegProcess.start("ffmpeg", arguments);
+    ffmpegProcess.start(ffmpegPath, arguments);
     
     // Wait for the process to complete (up to 60 seconds for video creation)
     if (!ffmpegProcess.waitForFinished(60000)) {
+        qDebug() << "FFmpeg process timed out";
         ffmpegProcess.kill();
         return false;
     }
     
     // Check if the process completed successfully
     if (ffmpegProcess.exitCode() != 0) {
+        qDebug() << "FFmpeg process failed with exit code:" << ffmpegProcess.exitCode();
+        qDebug() << "FFmpeg stderr:" << ffmpegProcess.readAllStandardError();
         return false;
     }
     
     // Verify that the output file was created
     if (!QFile::exists(outputPath)) {
+        qDebug() << "FFmpeg completed but output file not found:" << outputPath;
         return false;
     }
     
+    qDebug() << "FFmpeg video creation successful:" << outputPath;
     return true;
 }
 
@@ -5186,29 +5246,6 @@ void DicomViewer::onWorkerError(const QString& error)
     if (m_dvdWorkerThread) {
         m_dvdWorkerThread->quit();
         m_dvdWorkerThread->wait();
-    }
-}
-
-void DicomViewer::onFfmpegCopyStarted()
-{
-    qDebug() << "FFmpeg copy started (background operation - internal, not shown to user)";
-    
-    // Note: Don't show ffmpeg copy progress to user - it's an internal operation
-    // The user only cares about DICOM file copying, not utility files
-}
-
-void DicomViewer::onFfmpegCopyCompleted(bool success)
-{
-    qDebug() << "FFmpeg copy completed (internal operation):" << (success ? "SUCCESS" : "FAILED");
-    
-    // Don't update UI for internal ffmpeg copy - user doesn't need to see this
-    // The status should remain showing the main DICOM copy operation status
-    
-    // Log the result for debugging
-    if (success) {
-        qDebug() << "FFmpeg.exe is now available for video export functionality";
-    } else {
-        qDebug() << "Warning: FFmpeg.exe copy failed - video export may not work properly";
     }
 }
 

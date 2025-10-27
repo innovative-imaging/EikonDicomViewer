@@ -147,8 +147,6 @@ private slots:
     void onOverallProgress(int percentage, const QString& statusText);
     void onCopyCompleted(bool success);
     void onWorkerError(const QString& error);
-    void onFfmpegCopyStarted();
-    void onFfmpegCopyCompleted(bool success);
     
     // Essential input handler slots
     void onPlayPauseRequested();
@@ -270,6 +268,7 @@ private:
     // Utility methods
     void autoLoadDicomdir();
     double calculateFitToWindowZoom();
+    QString findFfmpegExecutable();  // Find ffmpeg.exe in local directory or DVD drive
     
     // Tree navigation methods
     QTreeWidgetItem* findNextSelectableItem(QTreeWidgetItem* currentItem);
