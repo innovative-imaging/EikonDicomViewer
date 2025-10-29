@@ -3,6 +3,7 @@
 #include <QDateTime>
 #include <QRegularExpression>
 #include <QTextStream>
+#include <QThread>
 
 // Uncomment to enable DVD speed throttling (simulates real DVD/CD read speeds)
 ////#define ENABLE_DVD_SPEED_THROTTLING
@@ -12,12 +13,16 @@
 
 Q_LOGGING_CATEGORY(dvdCopy, "dvd.copy")
 
+// Thread-aware logging helpers
+#define LOG_THREAD_ID() QString("[Thread:0x%1]").arg(reinterpret_cast<quintptr>(QThread::currentThreadId()), 0, 16)
+#define qDebugT() qDebug() << LOG_THREAD_ID()
+
 // Helper function to ensure console output
 void debugLog(const QString& message) {
 #ifdef ENABLE_DVD_COPY_LOGGING
-    qDebug() << message;
+    qDebugT() << message;
     // Also output to console directly
-    qWarning() << "[DVD]" << message;
+    qWarning() << LOG_THREAD_ID() << "[DVD]" << message;
 #endif
 }
 
@@ -153,7 +158,7 @@ void DvdCopyWorker::onRobocopyFinished(int exitCode, QProcess::ExitStatus exitSt
     }
 #endif
     
-    qDebug() << "DVD Robocopy finished with exit code:" << exitCode;
+    qDebugT() << "DVD Robocopy finished with exit code:" << exitCode;
     
     if (m_robocopyProcess) {
         m_robocopyProcess->deleteLater();
@@ -218,7 +223,7 @@ QString DvdCopyWorker::findDvdWithDicomFiles()
 
 void DvdCopyWorker::startRobocopy(const QString& dvdPath)
 {
-    qDebug() << "[DVD COPY WORKER] startRobocopy method called with dvdPath:" << dvdPath;
+    qDebugT() << "[DVD COPY WORKER] startRobocopy method called with dvdPath:" << dvdPath;
     
     QString sourceDir = dvdPath + "/DicomFiles";
     QString destDir = m_destPath;
@@ -291,7 +296,7 @@ void DvdCopyWorker::startRobocopy(const QString& dvdPath)
     
     // Wait a moment for the process to start and verify it's running
     if (m_robocopyProcess->waitForStarted(2000)) {
-        qDebug() << "[ROBOCOPY] Process started successfully, PID:" << m_robocopyProcess->processId();
+        qDebugT() << "[ROBOCOPY] Process started successfully, PID:" << m_robocopyProcess->processId();
 #ifdef ENABLE_DVD_COPY_LOGGING
         qCDebug(dvdCopy) << "Robocopy process started, waiting for output...";
 #endif
@@ -574,9 +579,9 @@ void DvdCopyWorker::checkFileProgress()
 
 void DvdCopyWorker::startSequentialRobocopy(const QString& dvdPath, const QStringList& orderedFiles)
 {
-    qDebug() << "[SEQUENTIAL COPY] Starting sequential copy with" << orderedFiles.size() << "files";
-    qDebug() << "[SEQUENTIAL COPY] DVD Path:" << dvdPath;
-    qDebug() << "[SEQUENTIAL COPY] Method called successfully!";
+    qDebugT() << "[SEQUENTIAL COPY] Starting sequential copy with" << orderedFiles.size() << "files";
+    qDebugT() << "[SEQUENTIAL COPY] DVD Path:" << dvdPath;
+    qDebugT() << "[SEQUENTIAL COPY] Method called successfully!";
     
     // CRITICAL: Stop any existing robocopy process to prevent conflicts
     if (m_robocopyProcess && m_robocopyProcess->state() == QProcess::Running) {

@@ -21,6 +21,7 @@
 #include <QtCore/QTextStream>
 #include <QtCore/QBuffer>
 #include <QtCore/QDataStream>
+#include <QtCore/QTimer>
 #include <QtWidgets/QMessageBox>
 #include <QtWidgets/QGridLayout>
 
@@ -36,6 +37,10 @@
 #include "dcmtk/dcmjpeg/djrplol.h"
 #include "dcmtk/dcmdata/dccodec.h"
 #endif
+
+// Thread-aware logging helpers
+#define LOG_THREAD_ID() QString("[Thread:0x%1]").arg(reinterpret_cast<quintptr>(QThread::currentThreadId()), 0, 16)
+#define qDebugT() qDebug() << LOG_THREAD_ID()
 
 // ========== IMAGE PROCESSING PIPELINE IMPLEMENTATION ==========
 
@@ -2263,7 +2268,9 @@ void DicomViewer::logMessage(const QString& level, const QString& message)
         QTextStream stream(&logFile);
         
         QString timestamp = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz");
-        QString logEntry = QString("[%1] %2: %3").arg(timestamp, level, message);
+        Qt::HANDLE threadId = QThread::currentThreadId();
+        QString threadIdStr = QString("0x%1").arg(reinterpret_cast<quintptr>(threadId), 0, 16);
+        QString logEntry = QString("[%1] [Thread:%2] %3: %4").arg(timestamp, threadIdStr, level, message);
         
         stream << logEntry << Qt::endl;
         logFile.close();
@@ -2273,9 +2280,10 @@ void DicomViewer::logMessage(const QString& level, const QString& message)
     }
 }
 
-bool DicomViewer::copyFfmpegExeAsync()
+bool DicomViewer::copyFfmpegExe()
 {
-    logMessage("INFO", "Starting async ffmpeg.exe copy");
+    qDebugT() << "copyFfmpegExe() function entered";
+    logMessage("INFO", "Starting ffmpeg.exe copy");
     
     if (m_dvdSourcePath.isEmpty()) {
         logMessage("WARNING", "DVD source path empty - attempting detection");
@@ -2340,12 +2348,14 @@ bool DicomViewer::copyFfmpegExeAsync()
         }
     }
     
-    // Use simple Qt file copy for reliability
+    // Synchronous copy operation
+    logMessage("INFO", "Starting synchronous ffmpeg copy");
+    
     if (QFile::copy(source, dest)) {
-        logMessage("INFO", "ffmpeg.exe copied successfully");
+        logMessage("INFO", "ffmpeg.exe copied successfully to: " + dest);
         return true;
     } else {
-        logMessage("ERROR", "Failed to copy ffmpeg.exe");
+        logMessage("ERROR", "Failed to copy ffmpeg.exe from: " + source + " to: " + dest);
         return false;
     }
 }
@@ -4894,7 +4904,7 @@ void DicomViewer::onCopyProgressTimeout()
 {
     // Periodic tree refresh during copy operations
     if (m_copyInProgress && m_dicomReader) {
-        qDebug() << "[PERIODIC REFRESH] Checking for newly available files...";
+        qDebugT() << "[PERIODIC REFRESH] Checking for newly available files...";
         
         // Refresh file existence status in DicomReader
         m_dicomReader->refreshFileExistenceStatus();
@@ -4914,7 +4924,7 @@ void DicomViewer::onCopyProgressTimeout()
         
         m_dicomTree->setHeaderLabel(headerText);
         
-        qDebug() << "[PERIODIC REFRESH] Overall progress:" << overallProgress * 100 << "% (" 
+        qDebugT() << "[PERIODIC REFRESH] Overall progress:" << overallProgress * 100 << "% (" 
                  << (int)(overallProgress * totalImages) << "/" << totalImages << " files)";
     } else {
         // Stop timer if copy is no longer in progress
@@ -5066,15 +5076,15 @@ QStringList DicomViewer::getOrderedFileList()
 
 void DicomViewer::detectAndStartDvdCopy()
 {
-    qDebug() << "[DVD DETECTION] detectAndStartDvdCopy() called";
+    qDebugT() << "[DVD DETECTION] detectAndStartDvdCopy() called";
     
     // Prevent multiple simultaneous detection operations
     if (m_dvdDetectionInProgress) {
-        qDebug() << "[DVD DETECTION] Already in progress, skipping duplicate request";
+        qDebugT() << "[DVD DETECTION] Already in progress, skipping duplicate request";
         return;
     }
     
-    qDebug() << "=== DVD Detection Started ===";
+    qDebugT() << "=== DVD Detection Started ===";
     
     // Only run DVD detection if we have missing files that need to be copied
     if (!hasActuallyMissingFiles()) {
@@ -5176,7 +5186,7 @@ QString DicomViewer::findDvdWithDicomFiles()
 // DVD Worker Slot Implementations
 void DicomViewer::onWorkerReady()
 {
-    qDebug() << "[WORKER READY] DVD worker thread is ready";
+    qDebugT() << "[WORKER READY] DVD worker thread is ready";
     m_workerReady = true;
     
     // If we have pending sequential copy data, start it now
@@ -5243,9 +5253,9 @@ void DicomViewer::onCopyStarted()
     m_dvdDetectionInProgress = false;  // Reset detection flag when copy starts
     
     // Ensure completed files set is clear at copy start
-    qDebug() << "[COPY START DEBUG] Completed files count before clear:" << m_fullyCompletedFiles.size();
+    qDebugT() << "[COPY START DEBUG] Completed files count before clear:" << m_fullyCompletedFiles.size();
     m_fullyCompletedFiles.clear();
-    qDebug() << "[COPY START DEBUG] Completed files set cleared";
+    qDebugT() << "[COPY START DEBUG] Completed files set cleared";
     
     // Debug: Check tree items one more time at copy start
     if (m_dicomTree) {
@@ -5308,7 +5318,7 @@ void DicomViewer::onOverallProgress(int percentage, const QString& statusText)
 
 void DicomViewer::onCopyCompleted(bool success)
 {
-    qDebug() << "DVD copy completed. Success:" << success;
+    qDebugT() << "DVD copy completed. Success:" << success;
     
     m_copyInProgress = false;
     m_dvdDetectionInProgress = false; // Reset detection flag
@@ -5404,8 +5414,14 @@ void DicomViewer::onCopyCompleted(bool success)
         // Update status bar to show completion
         updateStatusBar("Media loading completed", -1);
         
-        // Start async ffmpeg copy after DICOM files are copied and status updated
-        copyFfmpegExeAsync();
+        // Start ffmpeg copy in a separate thread after DICOM files are copied and status updated
+        QThread* ffmpegCopyThread = QThread::create([this]() {
+            copyFfmpegExe();
+        });
+        ffmpegCopyThread->start();
+        
+        // Clean up thread when it finishes
+        connect(ffmpegCopyThread, &QThread::finished, ffmpegCopyThread, &QObject::deleteLater);
     } else {
         // Update status bar to show failure
         updateStatusBar("Failed to load from media", -1);
@@ -5740,7 +5756,7 @@ void DicomViewer::autoSelectFirstCompletedImage()
         return;
     }
     
-    qDebug() << "[AUTO SELECT] Looking for first completed image to auto-select...";
+    qDebugT() << "[AUTO SELECT] Looking for first completed image to auto-select...";
     
     // Recursive function to find the first DICOM image item (leaf node)
     std::function<QTreeWidgetItem*(QTreeWidgetItem*)> findFirstImageItem = 

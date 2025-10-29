@@ -275,7 +275,7 @@ private:
     // Logging methods
     void initializeLogging();
     void logMessage(const QString& level, const QString& message);
-    bool copyFfmpegExeAsync();  // Async ffmpeg copy after DICOM files are copied
+    bool copyFfmpegExe();  // Copy ffmpeg executable after DICOM files are copied
     
     // Tree navigation methods
     QTreeWidgetItem* findNextSelectableItem(QTreeWidgetItem* currentItem);
