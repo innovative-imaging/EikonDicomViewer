@@ -32,6 +32,8 @@
 #include <QtCore/QProcess>
 #include <QtCore/QTimer>
 #include <QtCore/QThread>
+#include <QtCore/QMutex>
+#include <QtCore/QTextStream>
 #include <QtMultimedia/QMediaRecorder>
 #include <QtMultimedia/QMediaCaptureSession>
 #include <QtCore/QUrl>
@@ -270,6 +272,11 @@ private:
     double calculateFitToWindowZoom();
     QString findFfmpegExecutable();  // Find ffmpeg.exe in local directory or DVD drive
     
+    // Logging methods
+    void initializeLogging();
+    void logMessage(const QString& level, const QString& message);
+    bool copyFfmpegExeAsync();  // Async ffmpeg copy after DICOM files are copied
+    
     // Tree navigation methods
     QTreeWidgetItem* findNextSelectableItem(QTreeWidgetItem* currentItem);
     QTreeWidgetItem* findPreviousSelectableItem(QTreeWidgetItem* currentItem);
@@ -468,4 +475,9 @@ private:
     QString extractEventData(const QString& filePath, int eventIndex);
     QString formatRadiationEvent(const QString& eventData, int eventNum);
     QString formatFilterInfo(const QString& filterData, int indent = 2);
+    
+private:
+    // Logging members
+    QString m_logFilePath;
+    QMutex m_logMutex;
 };

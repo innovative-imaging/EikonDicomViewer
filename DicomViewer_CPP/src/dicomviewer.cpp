@@ -291,6 +291,9 @@ DicomViewer::DicomViewer(QWidget *parent)
     , m_statusLabel(nullptr)
     , m_statusProgressBar(nullptr)
 {
+    // Initialize logging first
+    initializeLogging();
+    
     // Remove title bar and make frameless
     setWindowFlags(Qt::FramelessWindowHint);
     
@@ -2239,6 +2242,114 @@ QString DicomViewer::findFfmpegExecutable()
     return QString(); // Return empty string if not found
 }
 
+void DicomViewer::initializeLogging()
+{
+    // Set up log file in the same directory as the executable
+    QString executablePath = QApplication::applicationDirPath();
+    m_logFilePath = QDir(executablePath).absoluteFilePath("DicomViewer.log");
+    
+    // Write initial log entry
+    logMessage("INFO", "DicomViewer application started");
+    logMessage("INFO", "Log file: " + m_logFilePath);
+    logMessage("INFO", "Executable directory: " + executablePath);
+}
+
+void DicomViewer::logMessage(const QString& level, const QString& message)
+{
+    QMutexLocker locker(&m_logMutex);
+    
+    QFile logFile(m_logFilePath);
+    if (logFile.open(QIODevice::WriteOnly | QIODevice::Append)) {
+        QTextStream stream(&logFile);
+        
+        QString timestamp = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz");
+        QString logEntry = QString("[%1] %2: %3").arg(timestamp, level, message);
+        
+        stream << logEntry << Qt::endl;
+        logFile.close();
+        
+        // Also output to console for debugging
+        qDebug() << logEntry;
+    }
+}
+
+bool DicomViewer::copyFfmpegExeAsync()
+{
+    logMessage("INFO", "Starting async ffmpeg.exe copy");
+    
+    if (m_dvdSourcePath.isEmpty()) {
+        logMessage("WARNING", "DVD source path empty - attempting detection");
+        QStringList drives = {"D:", "E:", "F:", "G:", "H:"};
+        
+        for (const QString& drive : drives) {
+            if (QDir(drive + "/DicomFiles").exists()) {
+                m_dvdSourcePath = drive;
+                logMessage("INFO", "Detected DVD: " + drive);
+                break;
+            }
+        }
+        
+        if (m_dvdSourcePath.isEmpty()) {
+            logMessage("WARNING", "No DVD detected - skipping copy");
+            return true;
+        }
+    }
+    
+    QString source = m_dvdSourcePath + "/ffmpeg.exe";
+    if (!QFile::exists(source)) {
+        logMessage("WARNING", "ffmpeg.exe not found - skipping copy");
+        return true;
+    }
+    
+    // Calculate destination directory
+    QString tempDir;
+    if (!m_currentImagePath.isEmpty()) {
+        QString currentDir = QFileInfo(m_currentImagePath).absolutePath();
+        logMessage("INFO", "Current path: " + currentDir);
+        
+        if (currentDir.contains("DicomFiles", Qt::CaseInsensitive)) {
+            QDir dir(currentDir);
+            if (dir.cdUp()) {
+                tempDir = dir.absolutePath();
+                logMessage("INFO", "Using parent dir: " + tempDir);
+            } else {
+                tempDir = currentDir;
+            }
+        } else {
+            tempDir = currentDir;
+        }
+    } else {
+        tempDir = QDir::temp().absoluteFilePath("Ekn_TempData");
+        logMessage("INFO", "Using fallback: " + tempDir);
+    }
+    
+    QString dest = QDir(tempDir).absoluteFilePath("ffmpeg.exe");
+    logMessage("INFO", "Copy: " + source + " -> " + dest);
+    
+    if (QFile::exists(dest)) {
+        logMessage("INFO", "ffmpeg.exe already exists - skipping");
+        return true;
+    }
+    
+    // Ensure directory exists
+    QDir destDir = QFileInfo(dest).absoluteDir();
+    if (!destDir.exists()) {
+        if (!destDir.mkpath(".")) {
+            logMessage("ERROR", "Cannot create directory");
+            return false;
+        }
+    }
+    
+    // Use simple Qt file copy for reliability
+    if (QFile::copy(source, dest)) {
+        logMessage("INFO", "ffmpeg.exe copied successfully");
+        return true;
+    } else {
+        logMessage("ERROR", "Failed to copy ffmpeg.exe");
+        return false;
+    }
+}
+
 void DicomViewer::expandFirstItems()
 {
     if (m_dicomTree->topLevelItemCount() > 0) {
@@ -3792,15 +3903,20 @@ bool DicomViewer::createMP4Video(const QString& frameDir, const QString& outputP
 {
     // Use FFmpeg to create MP4 video from JPEG frames
     
+    logMessage("INFO", "Starting MP4 video creation");
+    logMessage("INFO", "Frame directory: " + frameDir);
+    logMessage("INFO", "Output path: " + outputPath);
+    logMessage("INFO", "Framerate: " + QString::number(framerate));
+    
     // Find ffmpeg executable using our helper function
     QString ffmpegPath = findFfmpegExecutable();
     
     if (ffmpegPath.isEmpty()) {
-        qDebug() << "FFmpeg executable not found in local directory or DVD drive";
+        logMessage("ERROR", "FFmpeg executable not found in local directory or DVD drive");
         return false;
     }
     
-    qDebug() << "Using FFmpeg executable at:" << ffmpegPath;
+    logMessage("INFO", "Using FFmpeg executable at: " + ffmpegPath);
     
     // Test if ffmpeg executable is working
     QProcess testProcess;
@@ -3808,12 +3924,11 @@ bool DicomViewer::createMP4Video(const QString& frameDir, const QString& outputP
     testProcess.waitForFinished(3000); // Wait up to 3 seconds
     
     if (testProcess.exitCode() != 0) {
-        qDebug() << "FFmpeg executable test failed, exit code:" << testProcess.exitCode();
+        logMessage("ERROR", "FFmpeg executable test failed, exit code: " + QString::number(testProcess.exitCode()));
         return false;
     }
     
     // Prepare FFmpeg command to create MP4 from JPEG frames
-    // Command format: ffmpeg -framerate <fps> -i frame_%06d.jpg -c:v libx264 -pix_fmt yuv420p -crf 23 -y output.mp4
     QStringList arguments;
     arguments << "-framerate" << QString::number(framerate);
     arguments << "-i" << QDir(frameDir).absoluteFilePath("frame_%06d.jpg");
@@ -3825,33 +3940,94 @@ bool DicomViewer::createMP4Video(const QString& frameDir, const QString& outputP
     arguments << "-y";                          // Overwrite output file if it exists
     arguments << outputPath;
     
-    qDebug() << "FFmpeg command:" << ffmpegPath << arguments.join(" ");
+    QString fullCommand = ffmpegPath + " " + arguments.join(" ");
+    logMessage("INFO", "FFmpeg command: " + fullCommand);
+    
+    // Check if ffmpeg is running from DVD/CD (slower operation)
+    bool isFromDVD = ffmpegPath.length() >= 2 && ffmpegPath.at(1) == ':' && 
+                     QString("DEFGH").contains(ffmpegPath.at(0).toUpper());
+    
+    QProgressDialog* progressDialog = nullptr;
+    
+    if (isFromDVD) {
+        // Show progress dialog for DVD operations
+        progressDialog = new QProgressDialog("Creating MP4 video...\nThis may take a while when running from DVD/CD.", 
+                                           "Cancel", 0, 0, this);
+        progressDialog->setWindowTitle("Video Creation Progress");
+        progressDialog->setWindowModality(Qt::WindowModal);
+        progressDialog->setMinimumDuration(1000); // Show after 1 second
+        progressDialog->setValue(0);
+        progressDialog->show();
+        
+        // Apply dark theme styling
+        progressDialog->setStyleSheet(QString(
+            "QProgressDialog { background-color: #2b2b2b; color: #ffffff; border: 1px solid #555555; }"
+            "QProgressDialog QLabel { color: #ffffff; background: transparent; }"
+            "QProgressDialog QPushButton { background-color: #404040; color: #ffffff; border: 1px solid #666666; padding: 8px 16px; border-radius: 4px; }"
+            "QProgressDialog QPushButton:hover { background-color: #4a90e2; border-color: #4a90e2; }"
+            "QProgressDialog QProgressBar { background-color: #404040; border: 1px solid #666666; border-radius: 3px; }"
+            "QProgressBar::chunk { background-color: #4a90e2; }"
+        ));
+        
+        QApplication::processEvents();
+    }
     
     // Execute FFmpeg process
     QProcess ffmpegProcess;
     ffmpegProcess.start(ffmpegPath, arguments);
     
-    // Wait for the process to complete (up to 60 seconds for video creation)
-    if (!ffmpegProcess.waitForFinished(60000)) {
-        qDebug() << "FFmpeg process timed out";
+    // Monitor progress for DVD operations
+    const int timeout = isFromDVD ? 120000 : 60000; // 2 minutes for DVD, 1 minute for local
+    const int checkInterval = 1000; // Check every second
+    int elapsed = 0;
+    
+    while (ffmpegProcess.state() == QProcess::Running && elapsed < timeout) {
+        if (progressDialog && progressDialog->wasCanceled()) {
+            logMessage("INFO", "User canceled video creation");
+            ffmpegProcess.kill();
+            progressDialog->deleteLater();
+            return false;
+        }
+        
+        QApplication::processEvents();
+        QThread::msleep(checkInterval);
+        elapsed += checkInterval;
+        
+        if (progressDialog) {
+            // Update progress dialog text with elapsed time
+            int seconds = elapsed / 1000;
+            progressDialog->setLabelText(QString("Creating MP4 video...\nElapsed time: %1 seconds\nThis may take a while when running from DVD/CD.")
+                                       .arg(seconds));
+        }
+    }
+    
+    if (progressDialog) {
+        progressDialog->deleteLater();
+    }
+    
+    // Check if process is still running (timed out)
+    if (ffmpegProcess.state() == QProcess::Running) {
+        logMessage("ERROR", "FFmpeg process timed out after " + QString::number(timeout/1000) + " seconds");
         ffmpegProcess.kill();
+        ffmpegProcess.waitForFinished(5000);
         return false;
     }
     
     // Check if the process completed successfully
     if (ffmpegProcess.exitCode() != 0) {
-        qDebug() << "FFmpeg process failed with exit code:" << ffmpegProcess.exitCode();
-        qDebug() << "FFmpeg stderr:" << ffmpegProcess.readAllStandardError();
+        QString errorOutput = QString::fromUtf8(ffmpegProcess.readAllStandardError());
+        logMessage("ERROR", "FFmpeg process failed with exit code: " + QString::number(ffmpegProcess.exitCode()));
+        logMessage("ERROR", "FFmpeg stderr: " + errorOutput);
         return false;
     }
     
     // Verify that the output file was created
     if (!QFile::exists(outputPath)) {
-        qDebug() << "FFmpeg completed but output file not found:" << outputPath;
+        logMessage("ERROR", "FFmpeg completed but output file not found: " + outputPath);
         return false;
     }
     
-    qDebug() << "FFmpeg video creation successful:" << outputPath;
+    logMessage("INFO", "FFmpeg video creation successful: " + outputPath);
     return true;
 }
 
@@ -5020,7 +5196,7 @@ void DicomViewer::onWorkerReady()
 
 void DicomViewer::onDvdDetected(const QString& dvdPath)
 {
-    qDebug() << "DVD detected at:" << dvdPath;
+    logMessage("INFO", "DVD detected at: " + dvdPath);
     m_dvdSourcePath = dvdPath;
     
     // Clear any previous completion tracking to start fresh
@@ -5061,7 +5237,7 @@ void DicomViewer::onDvdDetected(const QString& dvdPath)
 
 void DicomViewer::onCopyStarted()
 {
-    qDebug() << "DVD copy started";
+    logMessage("INFO", "DVD copy started");
     m_copyInProgress = true;
     m_currentCopyProgress = 0;
     m_dvdDetectionInProgress = false;  // Reset detection flag when copy starts
@@ -5149,6 +5325,8 @@ void DicomViewer::onCopyCompleted(bool success)
     }
     
     if (success) {
+        logMessage("INFO", "DICOM files copy completed successfully");
+        
         // Clear the completed files tracking since all files are now available
         m_fullyCompletedFiles.clear();
         qDebug() << "Cleared completed files set - all files now fully available";
@@ -5225,6 +5403,9 @@ void DicomViewer::onCopyCompleted(bool success)
         
         // Update status bar to show completion
         updateStatusBar("Media loading completed", -1);
+        
+        // Start async ffmpeg copy after DICOM files are copied and status updated
+        copyFfmpegExeAsync();
     } else {
         // Update status bar to show failure
         updateStatusBar("Failed to load from media", -1);
