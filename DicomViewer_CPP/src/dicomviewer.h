@@ -134,6 +134,7 @@ protected:
 
 signals:
     void requestSequentialRobocopyStart(const QString& dvdPath, const QStringList& orderedFiles);
+    void ffmpegCopyCompleted(bool success);
 
 private slots:
     // Simplified framework integration slots
@@ -179,6 +180,9 @@ private slots:
     
     // Copy monitoring slots
     void onCopyProgressTimeout();
+    
+    // FFmpeg copy completion slot
+    void onFfmpegCopyCompleted(bool success);
     
     // Image transformation slots
     void horizontalFlip();
@@ -272,6 +276,9 @@ private:
     double calculateFitToWindowZoom();
     QString findFfmpegExecutable();  // Find ffmpeg.exe in local directory or DVD drive
     
+    // FFmpeg copy methods
+    void checkInitialFfmpegAvailability();
+    
     // Logging methods
     void initializeLogging();
     void logMessage(const QString& level, const QString& message);
@@ -298,6 +305,8 @@ private:
     QPushButton* m_closeButton;
     QAction* m_playAction; // Play/Pause button action
     QAction* m_windowLevelToggleAction; // Window/Level mode toggle button action
+    QAction* m_saveImageAction; // Save image button action
+    QAction* m_saveRunAction; // Save run button action
     
     // Left sidebar
     QFrame* m_leftSidebar;
@@ -408,6 +417,7 @@ private:
     bool m_copyInProgress;        // Still used for copy state tracking
     int m_currentCopyProgress;    // Still used for progress tracking
     bool m_dvdDetectionInProgress; // Prevent multiple simultaneous DVD detection
+    bool m_ffmpegCopyCompleted;   // Track if ffmpeg copy has completed
     QStringList m_completedFiles; // Track files that have reached 100% completion
     QSet<QString> m_fullyCompletedFiles; // Track files that are fully accessible (100% + file exists)
     

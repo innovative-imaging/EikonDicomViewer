@@ -232,6 +232,8 @@ DicomViewer::DicomViewer(QWidget *parent)
     , m_closeButton(nullptr)
     , m_playAction(nullptr)
     , m_windowLevelToggleAction(nullptr)
+    , m_saveImageAction(nullptr)
+    , m_saveRunAction(nullptr)
     , m_leftSidebar(nullptr)
     , m_dicomTree(nullptr)
     , m_mainStack(nullptr)
@@ -285,6 +287,7 @@ DicomViewer::DicomViewer(QWidget *parent)
     , m_copyInProgress(false)
     , m_currentCopyProgress(0)
     , m_dvdDetectionInProgress(false)
+    , m_ffmpegCopyCompleted(false)
     , m_completedFiles()
     , m_fullyCompletedFiles()
     , m_workerReady(false)
@@ -556,6 +559,9 @@ DicomViewer::DicomViewer(QWidget *parent)
     // Step 1: Add toolbar
     createToolbars();
     
+    // Check FFmpeg availability immediately after toolbar creation
+    checkInitialFfmpegAvailability();
+    
     // Step 4: Add overlay labels
     createOverlayLabels(m_imageWidget);
     
@@ -662,6 +668,11 @@ void DicomViewer::initializeDvdWorker()
                                m_dvdWorker, &DvdCopyWorker::startSequentialRobocopy,
                                Qt::QueuedConnection);
     qDebug() << "[DVD WORKER] Sequential robocopy signal connection established:" << (seqConnected ? "SUCCESS" : "FAILED");
+    
+    // Connect ffmpeg copy completion signal to slot
+    connect(this, &DicomViewer::ffmpegCopyCompleted,
+            this, &DicomViewer::onFfmpegCopyCompleted,
+            Qt::QueuedConnection);
 }
 
 void DicomViewer::createToolbars()
@@ -765,6 +776,15 @@ void DicomViewer::createToolbars()
         // Store reference to window/level toggle button
         if (action.slot == &DicomViewer::toggleWindowLevelMode) {
             m_windowLevelToggleAction = toolAction;
+        }
+        
+        // Store references to export actions for enable/disable control
+        if (action.slot == &DicomViewer::saveImage) {
+            m_saveImageAction = toolAction;
+        } else if (action.slot == &DicomViewer::saveRun) {
+            m_saveRunAction = toolAction;
+            toolAction->setEnabled(false); // Disable video export until ffmpeg copy is completed
+            qDebugT() << "Save run button created and disabled - awaiting ffmpeg copy completion";
         }
         
         // Store transformation actions for enable/disable functionality
@@ -1458,6 +1478,15 @@ void DicomViewer::saveImage()
 
 void DicomViewer::saveRun()
 {
+    // Safety check: Don't allow video export if ffmpeg copy hasn't completed
+    if (!m_ffmpegCopyCompleted) {
+        QMessageBox::warning(this, "Video Export Not Available", 
+            "Video export is not yet available. FFmpeg is still being copied.\n"
+            "Please wait for the copy process to complete.");
+        qDebugT() << "Save run blocked - ffmpeg copy not yet completed";
+        return;
+    }
+    
     if (m_currentPixmap.isNull()) {
         return;
     }
@@ -1476,6 +1505,7 @@ void DicomViewer::saveRun()
             performVideoExport(settings);
         }
     } catch (const std::exception& e) {
+        qDebugT() << "Exception in saveRun:" << e.what();
     }
 }
 
@@ -2200,6 +2230,20 @@ void DicomViewer::autoLoadDicomdir()
     }
 }
 
+void DicomViewer::checkInitialFfmpegAvailability()
+{
+    qDebugT() << "Initializing Save Run button as disabled until ffmpeg copy completes";
+    
+    if (m_saveRunAction) {
+        // ALWAYS start with button disabled - keep original sequence as is
+        m_saveRunAction->setEnabled(false);
+        qDebugT() << "Save run button disabled at startup - will be enabled only after ffmpeg copy thread completion";
+        logMessage("INFO", "Save Run button disabled - awaiting ffmpeg copy completion");
+    }
+}
+
+
+
 QString DicomViewer::findFfmpegExecutable()
 {
     // First, check if ffmpeg.exe is in the same directory as DicomViewer.exe
@@ -2211,6 +2255,15 @@ QString DicomViewer::findFfmpegExecutable()
     if (QFile::exists(localFfmpegPath)) {
         qDebug() << "Found ffmpeg.exe in local directory";
         return localFfmpegPath;
+    }
+    
+    // Check temp folder where DVD copy might have placed it
+    QString tempFfmpegPath = QDir::tempPath() + "/Ekn_TempData/ffmpeg.exe";
+    qDebug() << "Checking for ffmpeg.exe in temp folder:" << tempFfmpegPath;
+    
+    if (QFile::exists(tempFfmpegPath)) {
+        qDebug() << "Found ffmpeg.exe in temp folder";
+        return tempFfmpegPath;
     }
     
     // If not found locally, check the DVD drive (if available)
@@ -2299,6 +2352,7 @@ bool DicomViewer::copyFfmpegExe()
         
         if (m_dvdSourcePath.isEmpty()) {
             logMessage("WARNING", "No DVD detected - skipping copy");
+            emit ffmpegCopyCompleted(true); // Still enable exports if local ffmpeg exists
             return true;
         }
     }
@@ -2306,6 +2360,7 @@ bool DicomViewer::copyFfmpegExe()
     QString source = m_dvdSourcePath + "/ffmpeg.exe";
     if (!QFile::exists(source)) {
         logMessage("WARNING", "ffmpeg.exe not found - skipping copy");
+        emit ffmpegCopyCompleted(true); // Still enable exports if local ffmpeg exists
         return true;
     }
     
@@ -2336,6 +2391,7 @@ bool DicomViewer::copyFfmpegExe()
     
     if (QFile::exists(dest)) {
         logMessage("INFO", "ffmpeg.exe already exists - skipping");
+        emit ffmpegCopyCompleted(true);
         return true;
     }
     
@@ -2353,9 +2409,11 @@ bool DicomViewer::copyFfmpegExe()
     
     if (QFile::copy(source, dest)) {
         logMessage("INFO", "ffmpeg.exe copied successfully to: " + dest);
+        emit ffmpegCopyCompleted(true);
         return true;
     } else {
         logMessage("ERROR", "Failed to copy ffmpeg.exe from: " + source + " to: " + dest);
+        emit ffmpegCopyCompleted(false);
         return false;
     }
 }
@@ -5443,6 +5501,25 @@ void DicomViewer::onWorkerError(const QString& error)
     if (m_dvdWorkerThread) {
         m_dvdWorkerThread->quit();
         m_dvdWorkerThread->wait();
+    }
+}
+
+void DicomViewer::onFfmpegCopyCompleted(bool success)
+{
+    qDebugT() << "FFmpeg copy completed. Success:" << success << "- Updating Save run button state";
+    
+    m_ffmpegCopyCompleted = success;
+    
+    if (success && m_saveRunAction) {
+        m_saveRunAction->setEnabled(true);
+        logMessage("INFO", "Video export functionality now available - FFmpeg ready");
+        qDebugT() << "Save run button enabled after successful ffmpeg copy";
+    } else if (!success) {
+        if (m_saveRunAction) {
+            m_saveRunAction->setEnabled(false);
+        }
+        logMessage("WARNING", "FFmpeg copy failed - Video export will remain disabled");
+        qDebugT() << "Save run button remains disabled due to ffmpeg copy failure";
     }
 }
 
