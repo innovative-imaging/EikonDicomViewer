@@ -28,7 +28,7 @@ void debugLog(const QString& message) {
 
 DvdCopyWorker::DvdCopyWorker(const QString& destPath, QObject* parent)
     : QObject(parent), m_destPath(destPath), m_robocopyProcess(nullptr), m_progressTimer(nullptr), m_lastLogPosition(0),
-      m_currentFileIndex(0)
+      m_currentFileIndex(0), m_preferredSourceDrive()
 {
     debugLog("=== DVD Copy Worker Initialized ===");
     debugLog("Destination Path: " + m_destPath);
@@ -170,12 +170,60 @@ void DvdCopyWorker::onRobocopyFinished(int exitCode, QProcess::ExitStatus exitSt
 
 QString DvdCopyWorker::findDvdWithDicomFiles()
 {
+    // If preferred source drive is provided, check it first
+    if (!m_preferredSourceDrive.isEmpty()) {
+        debugLog(QString("Checking preferred source drive: %1").arg(m_preferredSourceDrive));
+        
+        QString testDrive = m_preferredSourceDrive;
+        if (!testDrive.endsWith("\\") && !testDrive.endsWith("/")) {
+            testDrive += "/";
+        }
+        if (!testDrive.endsWith(":")) {
+            // Remove trailing slash and check if we need to add colon
+            testDrive = testDrive.chopped(1);
+            if (!testDrive.endsWith(":")) {
+                testDrive += ":";
+            }
+            testDrive += "/";
+        }
+        
+        QString dicomPath = testDrive + "DicomFiles";
+        QDir dir(dicomPath);
+        
+        debugLog(QString("Looking for DICOM files at preferred location: %1").arg(dicomPath));
+        
+        if (dir.exists()) {
+            QStringList filters;
+            filters << "*.dcm" << "*.DCM" << "*";
+            QStringList files = dir.entryList(filters, QDir::Files);
+            
+            if (files.count() > 0) {
+                debugLog(QString("Found %1 DICOM files in preferred drive %2").arg(files.count()).arg(testDrive));
+                
+                // Check if ffmpeg.exe also exists in the source drive
+                QString ffmpegPath = testDrive + "ffmpeg.exe";
+                if (QFile::exists(ffmpegPath)) {
+                    debugLog(QString("ffmpeg.exe found at %1 - preferred drive is complete").arg(ffmpegPath));
+                } else {
+                    debugLog(QString("ffmpeg.exe NOT found at %1 - but proceeding with preferred drive").arg(ffmpegPath));
+                }
+                
+                return testDrive.chopped(1); // Remove trailing slash to return "H:"
+            } else {
+                debugLog(QString("No DICOM files found in preferred drive %1").arg(testDrive));
+            }
+        } else {
+            debugLog(QString("DicomFiles directory does not exist in preferred drive %1").arg(testDrive));
+        }
+        
+        debugLog("Preferred source drive validation failed - falling back to auto-detection");
+    }
+    
+    // Fallback to original auto-detection logic
     QStringList drivesToCheck = {"D:", "E:", "F:", "G:", "H:"};
     
-#ifdef ENABLE_DVD_COPY_LOGGING
-    qCDebug(dvdCopy) << "--- Scanning for DVD drives with DICOM files ---";
-    qCDebug(dvdCopy) << "Drives to check:" << drivesToCheck;
-#endif
+    debugLog("--- Scanning for DVD drives with DICOM files (fallback mode) ---");
+    debugLog(QString("Drives to check: %1").arg(drivesToCheck.join(", ")));
     
     for (const QString& drive : drivesToCheck) {
         QString dicomPath = drive + "/DicomFiles";
@@ -797,5 +845,11 @@ void DvdCopyWorker::emitWorkerReady()
 {
     qDebug() << "[WORKER READY] DvdCopyWorker is ready to receive signals";
     emit workerReady();
+}
+
+void DvdCopyWorker::setPreferredSourceDrive(const QString& sourceDrive)
+{
+    m_preferredSourceDrive = sourceDrive;
+    debugLog(QString("Preferred source drive set to: %1").arg(sourceDrive));
 }
 

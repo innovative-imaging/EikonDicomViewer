@@ -122,7 +122,7 @@ class DicomViewer : public QMainWindow
     Q_OBJECT
 
 public:
-    DicomViewer(QWidget *parent = nullptr);
+    DicomViewer(QWidget *parent = nullptr, const QString& sourceDrive = QString());
     ~DicomViewer();
 
 protected:
@@ -490,4 +490,7 @@ private:
     // Logging members
     QString m_logFilePath;
     QMutex m_logMutex;
+    
+    // Source drive (from command line parameter)
+    QString m_providedSourceDrive;
 };

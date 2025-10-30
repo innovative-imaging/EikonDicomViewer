@@ -223,8 +223,9 @@ QImage ImageProcessingPipeline::windowLevelStage(const QImage& input) const
 
 // ========== DICOM VIEWER IMPLEMENTATION ==========
 
-DicomViewer::DicomViewer(QWidget *parent)
+DicomViewer::DicomViewer(QWidget *parent, const QString& sourceDrive)
     : QMainWindow(parent)
+    , m_providedSourceDrive(sourceDrive)
     , m_playbackController(nullptr)
     , m_inputHandler(nullptr)
     , m_centralWidget(nullptr)
@@ -631,6 +632,12 @@ void DicomViewer::initializeDvdWorker()
     m_dvdWorkerThread = new QThread(this);
     m_dvdWorker = new DvdCopyWorker(m_localDestPath);
     m_workerReady = false;  // Reset worker ready state
+    
+    // Set preferred source drive if provided via command line
+    if (!m_providedSourceDrive.isEmpty()) {
+        qDebugT() << "Setting preferred source drive for DVD worker:" << m_providedSourceDrive;
+        m_dvdWorker->setPreferredSourceDrive(m_providedSourceDrive);
+    }
     
     // Move worker to thread
     m_dvdWorker->moveToThread(m_dvdWorkerThread);
@@ -2339,21 +2346,33 @@ bool DicomViewer::copyFfmpegExe()
     logMessage("INFO", "Starting ffmpeg.exe copy");
     
     if (m_dvdSourcePath.isEmpty()) {
-        logMessage("WARNING", "DVD source path empty - attempting detection");
-        QStringList drives = {"D:", "E:", "F:", "G:", "H:"};
-        
-        for (const QString& drive : drives) {
-            if (QDir(drive + "/DicomFiles").exists()) {
-                m_dvdSourcePath = drive;
-                logMessage("INFO", "Detected DVD: " + drive);
-                break;
+        // First, try to use provided source drive from command line
+        if (!m_providedSourceDrive.isEmpty()) {
+            QString testDrive = m_providedSourceDrive;
+            if (!testDrive.endsWith(":")) {
+                testDrive += ":";
             }
-        }
-        
-        if (m_dvdSourcePath.isEmpty()) {
-            logMessage("WARNING", "No DVD detected - skipping copy");
-            emit ffmpegCopyCompleted(true); // Still enable exports if local ffmpeg exists
-            return true;
+            
+            logMessage("INFO", "Using provided source drive for ffmpeg copy: " + testDrive);
+            m_dvdSourcePath = testDrive;
+        } else {
+            // Fallback to auto-detection
+            logMessage("WARNING", "DVD source path empty - attempting detection");
+            QStringList drives = {"D:", "E:", "F:", "G:", "H:"};
+            
+            for (const QString& drive : drives) {
+                if (QDir(drive + "/DicomFiles").exists()) {
+                    m_dvdSourcePath = drive;
+                    logMessage("INFO", "Detected DVD: " + drive);
+                    break;
+                }
+            }
+            
+            if (m_dvdSourcePath.isEmpty()) {
+                logMessage("WARNING", "No DVD detected - skipping copy");
+                emit ffmpegCopyCompleted(true); // Still enable exports if local ffmpeg exists
+                return true;
+            }
         }
     }
     
@@ -5265,7 +5284,20 @@ void DicomViewer::onWorkerReady()
 void DicomViewer::onDvdDetected(const QString& dvdPath)
 {
     logMessage("INFO", "DVD detected at: " + dvdPath);
-    m_dvdSourcePath = dvdPath;
+    
+    // Only update m_dvdSourcePath if we don't have a preferred source drive from command line
+    if (m_providedSourceDrive.isEmpty()) {
+        m_dvdSourcePath = dvdPath;
+        logMessage("INFO", "Using auto-detected DVD path: " + dvdPath);
+    } else {
+        // Use the provided source drive for consistency
+        QString preferredDrive = m_providedSourceDrive;
+        if (!preferredDrive.endsWith(":")) {
+            preferredDrive += ":";
+        }
+        m_dvdSourcePath = preferredDrive;
+        logMessage("INFO", "Using provided source drive instead of detected: " + preferredDrive + " (detected was: " + dvdPath + ")");
+    }
     
     // Clear any previous completion tracking to start fresh
     qDebug() << "[INIT DEBUG] Clearing completed files set at DVD detection";

@@ -24,6 +24,7 @@ public slots:
     void startRobocopy(const QString& dvdPath);
     void startSequentialRobocopy(const QString& dvdPath, const QStringList& orderedFiles);
     void emitWorkerReady();
+    void setPreferredSourceDrive(const QString& sourceDrive);
 
 signals:
     void workerReady();
@@ -63,6 +64,7 @@ private:
     QStringList m_filesToCopy;    // Queue of files to copy in order
     int m_currentFileIndex;       // Current file being copied (for progress)
     QString m_dvdSourcePath;      // DVD source path for sequential copying
+    QString m_preferredSourceDrive; // Preferred source drive from command line
 };
 
 #endif // DVDCOPYWORKER_H

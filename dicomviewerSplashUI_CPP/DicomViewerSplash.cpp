@@ -801,8 +801,17 @@ bool LaunchViewer() {
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_SHOW;
     
+    // Build command line with source drive parameter
+    wstring commandLine = L"\"" + viewerPath + L"\" --source-drive=\"" + g_sourceDir + L"\"";
+    
+    // Create a mutable copy for CreateProcess
+    vector<wchar_t> cmdBuffer(commandLine.begin(), commandLine.end());
+    cmdBuffer.push_back(L'\0');
+    
+    LogMessage(L"INFO", L"Launching viewer with command: " + commandLine);
+    
     // Use the temp directory as working directory (where all files are located)
-    if (CreateProcess(viewerPath.c_str(), NULL, NULL, NULL, FALSE, 0, 
+    if (CreateProcess(NULL, cmdBuffer.data(), NULL, NULL, FALSE, 0, 
                      NULL, g_tempDir.c_str(), &si, &pi)) {
         
         CloseHandle(pi.hProcess);
@@ -1150,7 +1159,7 @@ void ExecutePipeline() {
         }
         LogMessage(L"INFO", L"Viewer executable verified at: " + viewerPath);
         
-        // Step 4: Launch viewer immediately after extraction
+        // Step 4: Launch viewer immediately after extraction with source drive parameter
         LogStepStart(L"Launch Viewer");
         UpdateStatus(L"Starting viewer");
         bool step4Success = LaunchViewer();

@@ -70,8 +70,24 @@ int main(int argc, char *argv[])
     app.setApplicationVersion("1.0.0");
     app.setOrganizationName("Eikon Imaging");
     
+    // Parse command line arguments for source drive
+    QString sourceDrive;
+    QStringList args = app.arguments();
+    
+    for (const QString& arg : args) {
+        if (arg.startsWith("--source-drive=")) {
+            sourceDrive = arg.mid(15); // Remove "--source-drive=" prefix
+            // Remove quotes if present
+            if (sourceDrive.startsWith("\"") && sourceDrive.endsWith("\"")) {
+                sourceDrive = sourceDrive.mid(1, sourceDrive.length() - 2);
+            }
+            std::cout << "Source drive parameter detected: " << sourceDrive.toStdString() << std::endl;
+            break;
+        }
+    }
+    
     // Create and show the main window
-    DicomViewer viewer;
+    DicomViewer viewer(nullptr, sourceDrive);
     
     viewer.show();
     
