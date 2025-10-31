@@ -2377,6 +2377,8 @@ bool DicomViewer::copyFfmpegExe()
     }
     
     QString source = m_dvdSourcePath + "/ffmpeg.exe";
+    logMessage("INFO", "Source Path for ffmpeg copy: " + source);
+
     if (!QFile::exists(source)) {
         logMessage("WARNING", "ffmpeg.exe not found - skipping copy");
         emit ffmpegCopyCompleted(true); // Still enable exports if local ffmpeg exists

@@ -77,11 +77,20 @@ int main(int argc, char *argv[])
     for (const QString& arg : args) {
         if (arg.startsWith("--source-drive=")) {
             sourceDrive = arg.mid(15); // Remove "--source-drive=" prefix
+            
+            // Debug: Show exact characters received
+            std::cout << "Raw source drive parameter (length " << sourceDrive.length() << "): ";
+            for (int i = 0; i < sourceDrive.length(); i++) {
+                std::cout << "[" << i << "]=" << sourceDrive.at(i).unicode() << " ";
+            }
+            std::cout << std::endl;
+            
             // Remove quotes if present
             if (sourceDrive.startsWith("\"") && sourceDrive.endsWith("\"")) {
                 sourceDrive = sourceDrive.mid(1, sourceDrive.length() - 2);
+                std::cout << "Removed quotes, result: " << sourceDrive.toStdString() << std::endl;
             }
-            std::cout << "Source drive parameter detected: " << sourceDrive.toStdString() << std::endl;
+            std::cout << "Final source drive parameter: " << sourceDrive.toStdString() << std::endl;
             break;
         }
     }

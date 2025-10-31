@@ -802,7 +802,12 @@ bool LaunchViewer() {
     si.wShowWindow = SW_SHOW;
     
     // Build command line with source drive parameter
-    wstring commandLine = L"\"" + viewerPath + L"\" --source-drive=\"" + g_sourceDir + L"\"";
+    // Remove trailing backslash from source dir to avoid quote escaping issues
+    wstring sourceDrive = g_sourceDir;
+    if (!sourceDrive.empty() && sourceDrive.back() == L'\\') {
+        sourceDrive = sourceDrive.substr(0, sourceDrive.length() - 1);
+    }
+    wstring commandLine = L"\"" + viewerPath + L"\" --source-drive=\"" + sourceDrive + L"\"";
     
     // Create a mutable copy for CreateProcess
     vector<wchar_t> cmdBuffer(commandLine.begin(), commandLine.end());
