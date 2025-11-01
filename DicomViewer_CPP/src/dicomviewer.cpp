@@ -284,6 +284,8 @@ DicomViewer::DicomViewer(QWidget *parent, const QString& sourceDrive)
     , m_dicomInfoVisible(false)
     , m_dicomInfoWidget(nullptr)
     , m_dicomInfoTextEdit(nullptr)
+    , m_cachedDicomInfoFilePath()
+    , m_cachedDicomInfoHtml()
     , m_copyProgressTimer(nullptr)
     , m_copyInProgress(false)
     , m_currentCopyProgress(0)
@@ -1456,6 +1458,10 @@ void DicomViewer::openDicomDir()
         tr("DICOMDIR Files (*.dcm *.DCM DICOMDIR);;All Files (*)"));
     
     if (!fileName.isEmpty()) {
+        // Enable Save Run button when opening files directly
+        if (m_saveRunAction) {
+            m_saveRunAction->setEnabled(true);
+        }
         loadDicomDir(fileName);
     }
 }
@@ -1883,15 +1889,8 @@ void DicomViewer::updateOverlayInfo()
     m_overlayBottomLeft->setText(bottomLeftText);
     m_overlayBottomRight->setText(bottomRightText);
     
-    // Update DICOM info panel if visible and we have a current image
-    if (m_dicomInfoVisible && !m_currentImagePath.isEmpty()) {
-        populateDicomInfo(m_currentImagePath);
-    }
-    
-    // Update DICOM info panel if it's visible
-    if (m_dicomInfoVisible && !m_currentImagePath.isEmpty()) {
-        populateDicomInfo(m_currentImagePath);
-    }
+    // Note: DICOM info panel is updated only when image changes or info panel is toggled,
+    // not on every frame change. This avoids expensive file I/O and HTML generation.
 }
 
 void DicomViewer::positionOverlays()
@@ -2249,8 +2248,6 @@ void DicomViewer::checkInitialFfmpegAvailability()
     }
 }
 
-
-
 QString DicomViewer::findFfmpegExecutable()
 {
     // First, check if ffmpeg.exe is in the same directory as DicomViewer.exe
@@ -2472,6 +2469,12 @@ void DicomViewer::expandFirstItems()
 void DicomViewer::loadDicomImage(const QString& filePath)
 {
 #ifdef HAVE_DCMTK
+    
+    // Clear DICOM info cache when loading a new image
+    if (m_currentImagePath != filePath) {
+        m_cachedDicomInfoFilePath.clear();
+        m_cachedDicomInfoHtml.clear();
+    }
     
     // Switch to image widget
     m_mainStack->setCurrentWidget(m_imageWidget);
@@ -2976,6 +2979,11 @@ void DicomViewer::onFrameReady(int frameNumber)
         
         // Enable transformations after first frame loads
         setTransformationActionsEnabled(true);
+        
+        // If DICOM info panel is visible, refresh it with the new image data
+        if (m_dicomInfoVisible && !m_currentImagePath.isEmpty()) {
+            populateDicomInfo(m_currentImagePath);
+        }
         
         // For multi-frame images, setup playback controller but don't start timer yet
         // We want progressive display during first load, timer-based replay afterward
@@ -4875,6 +4883,12 @@ void DicomViewer::populateDicomInfo(const QString& filePath)
         return;
     }
     
+    // Check if we already have cached HTML for this file
+    if (m_cachedDicomInfoFilePath == filePath && !m_cachedDicomInfoHtml.isEmpty()) {
+        m_dicomInfoTextEdit->setHtml(m_cachedDicomInfoHtml);
+        return;
+    }
+    
 #ifdef HAVE_DCMTK
     try {
         DcmFileFormat fileFormat;
@@ -4967,8 +4981,15 @@ void DicomViewer::populateDicomInfo(const QString& filePath)
         
         m_dicomInfoTextEdit->setHtml(htmlContent);
         
+        // Cache the HTML content for this file to avoid regenerating it
+        m_cachedDicomInfoFilePath = filePath;
+        m_cachedDicomInfoHtml = htmlContent;
+        
     } catch (...) {
         m_dicomInfoTextEdit->setPlainText("Error: Exception occurred while reading DICOM file");
+        // Clear cache on error
+        m_cachedDicomInfoFilePath.clear();
+        m_cachedDicomInfoHtml.clear();
     }
 #else
     m_dicomInfoTextEdit->setPlainText("DICOM support not available (DCMTK not compiled)");

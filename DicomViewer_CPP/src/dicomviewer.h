@@ -334,6 +334,10 @@ private:
     QWidget* m_dicomInfoWidget;
     QTextEdit* m_dicomInfoTextEdit;
     
+    // DICOM info caching
+    QString m_cachedDicomInfoFilePath;
+    QString m_cachedDicomInfoHtml;
+    
     // Professional framework components (simplified)
     DicomPlaybackController* m_playbackController;
     DicomInputHandler* m_inputHandler;
