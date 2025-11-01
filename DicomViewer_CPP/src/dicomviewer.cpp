@@ -2240,6 +2240,20 @@ void DicomViewer::checkInitialFfmpegAvailability()
 {
     qDebugT() << "Initializing Save Run button as disabled until ffmpeg copy completes";
     
+      // First check if FFmpeg already exists locally
+    QString executablePath = QApplication::applicationDirPath();
+    QString localFfmpegPath = QDir(executablePath).absoluteFilePath("ffmpeg.exe");
+    
+    if (QFile::exists(localFfmpegPath)) {
+        // FFmpeg already available - enable Save Run button immediately
+        if (m_saveRunAction) {
+            m_saveRunAction->setEnabled(true);
+            m_ffmpegCopyCompleted = true; // Mark as completed
+        }
+        logMessage("INFO", "FFmpeg found locally - Video export ready");
+        return; // Exit early - no need to wait for copy
+    }
+    
     if (m_saveRunAction) {
         // ALWAYS start with button disabled - keep original sequence as is
         m_saveRunAction->setEnabled(false);
