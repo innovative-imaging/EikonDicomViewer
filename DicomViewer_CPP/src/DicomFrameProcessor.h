@@ -90,6 +90,9 @@ public:
     double getDefaultWindowWidth() const { return m_defaultWindowWidth; }
     unsigned long getCurrentFrame() const { return m_currentFrame; }
     
+    // Get DICOM tag value as string
+    QString getDicomTagValue(const QString& tag) const;
+    
     // Check if processor is ready
     bool isValid() const { return m_fileFormat != nullptr && m_rawPixelData != nullptr; }
 

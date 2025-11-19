@@ -9,6 +9,8 @@
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QHeaderView>
 #include <QtWidgets/QToolButton>
+#include <QtWidgets/QListWidget>
+#include <QtWidgets/QVBoxLayout>
 #include <QtGui/QGuiApplication>
 #include <QtGui/QScreen>
 #include <QtGui/QPainter>
@@ -22,6 +24,11 @@
 #include <QtCore/QBuffer>
 #include <QtCore/QDataStream>
 #include <QtCore/QTimer>
+#include <QtCore/QThread>
+#include <QtCore/QMutex>
+#include <QtCore/QMetaObject>
+#include <QtCore/QRegularExpression>
+#include <QtCore/QRegularExpression>
 #include <QtWidgets/QMessageBox>
 #include <QtWidgets/QGridLayout>
 
@@ -237,6 +244,11 @@ DicomViewer::DicomViewer(QWidget *parent, const QString& sourceDrive)
     , m_saveRunAction(nullptr)
     , m_leftSidebar(nullptr)
     , m_dicomTree(nullptr)
+    , m_thumbnailPanel(nullptr)
+    , m_thumbnailList(nullptr)
+    , m_thumbnailThread(nullptr)
+    , m_completedThumbnails(0)
+    , m_totalThumbnails(0)
     , m_mainStack(nullptr)
     , m_imageWidget(nullptr)
     , m_reportArea(nullptr)
@@ -457,6 +469,12 @@ DicomViewer::DicomViewer(QWidget *parent, const QString& sourceDrive)
         mainLayout->addWidget(m_leftSidebar);
     }
     
+    // Step 2.25: Create Thumbnail Panel
+    createThumbnailPanel();
+    if (mainLayout && m_thumbnailPanel) {
+        mainLayout->addWidget(m_thumbnailPanel);
+    }
+
     // Step 2.5: Create DICOM Info Panel (between tree and main content like Python version)
     m_dicomInfoWidget = new QFrame;
     m_dicomInfoWidget->setObjectName("dicom_info_panel"); 
@@ -966,6 +984,74 @@ QWidget* DicomViewer::createImageWidget()
     createOverlayLabels(widget);
     
     return widget;
+}
+
+void DicomViewer::createThumbnailPanel()
+{
+    m_thumbnailPanel = new QFrame;
+    m_thumbnailPanel->setObjectName("thumbnail_panel");
+    m_thumbnailPanel->setFixedWidth(220);
+    m_thumbnailPanel->setStyleSheet(R"(
+        QFrame#thumbnail_panel { 
+            background-color: #2a2a2a; 
+            border-left: 1px solid #666666;
+            border-right: 1px solid #444444; 
+        }
+    )");
+    
+    QVBoxLayout* thumbnailLayout = new QVBoxLayout(m_thumbnailPanel);
+    thumbnailLayout->setContentsMargins(5, 5, 10, 5);  // Reduced right margin
+    thumbnailLayout->setSpacing(0);
+    
+    // Header label
+    QLabel* headerLabel = new QLabel("Thumbnails");
+    headerLabel->setStyleSheet("color: white; font-weight: bold; font-size: 12px; padding: 3px;");
+    headerLabel->setAlignment(Qt::AlignCenter);
+    thumbnailLayout->addWidget(headerLabel);
+    
+    // Thumbnail list - use IconMode with precise width control
+    m_thumbnailList = new QListWidget;
+    m_thumbnailList->setObjectName("thumbnail_list");
+    m_thumbnailList->setViewMode(QListWidget::IconMode);  // Back to IconMode
+    m_thumbnailList->setResizeMode(QListWidget::Fixed);
+    m_thumbnailList->setMovement(QListWidget::Static);
+    m_thumbnailList->setGridSize(QSize(200, 200));  // Adjusted for narrower panel
+    m_thumbnailList->setIconSize(QSize(190, 150));  // Slightly smaller thumbnails
+    m_thumbnailList->setSpacing(6);  // Reduced spacing
+    m_thumbnailList->setUniformItemSizes(true);  // Force uniform sizing
+    
+    // Set fixed width to prevent stretching
+    m_thumbnailList->setFixedWidth(210);  // Adjusted for narrower panel
+    m_thumbnailList->setStyleSheet(R"(
+        QListWidget {
+            background-color: #2a2a2a;
+            color: white;
+            border: 1px solid #444444;
+            outline: none;
+        }
+        QListWidget::item {
+            background-color: transparent;
+            border: 2px solid transparent;
+            border-radius: 4px;
+            margin: 4px;
+        }
+        QListWidget::item:selected {
+            background-color: transparent;
+            border: 3px solid #FFD700;
+        }
+        QListWidget::item:hover {
+            background-color: #404040;
+            border: 2px solid #666666;
+        }
+    )");
+    
+    connect(m_thumbnailList, &QListWidget::currentItemChanged,
+            this, &DicomViewer::onThumbnailItemSelected);
+    
+    thumbnailLayout->addWidget(m_thumbnailList);
+    
+    // Initially hide the thumbnail panel until thumbnails are loaded
+    m_thumbnailPanel->setVisible(false);
 }
 
 void DicomViewer::createOverlayLabels(QWidget* parent)
@@ -1522,6 +1608,360 @@ void DicomViewer::saveRun()
     }
 }
 
+void DicomViewer::onThumbnailItemSelected(QListWidgetItem* current, QListWidgetItem* previous)
+{
+    Q_UNUSED(previous)
+    if (!current) return;
+    
+    // Get the file path from the item data
+    QString filePath = current->data(Qt::UserRole).toString();
+    if (!filePath.isEmpty()) {
+        // Find and select the corresponding tree item
+        if (m_dicomTree) {
+            QTreeWidgetItemIterator it(m_dicomTree);
+            while (*it) {
+                QVariantList userData = (*it)->data(0, Qt::UserRole).toList();
+                if (userData.size() >= 2) {
+                    QString itemType = userData[0].toString();
+                    QString itemPath = userData[1].toString();
+                    if ((itemType == "image" || itemType == "report") && itemPath == filePath) {
+                        m_dicomTree->setCurrentItem(*it);
+                        break;
+                    }
+                }
+                ++it;
+            }
+        }
+        
+        // Load the DICOM image or report based on type
+        // The tree selection will trigger the appropriate display via onTreeItemSelected
+        // No need to call loadDicomImage directly here
+    }
+}
+
+void DicomViewer::updateThumbnailPanel()
+{
+    if (!m_thumbnailList || !m_dicomTree) {
+        qDebug() << "Thumbnail panel or tree not available";
+        return;
+    }
+    
+    qDebug() << "Updating thumbnail panel...";
+    
+    // Clear existing thumbnails and reset counters
+    m_thumbnailList->clear();
+    m_pendingThumbnailPaths.clear();
+    m_completedThumbnails = 0;
+    m_totalThumbnails = 0;
+    
+    // Collect all image and report paths first
+    QTreeWidgetItemIterator it(m_dicomTree);
+    while (*it) {
+        QVariantList userData = (*it)->data(0, Qt::UserRole).toList();
+        if (userData.size() >= 2) {
+            QString itemType = userData[0].toString();
+            QString filePath = userData[1].toString();
+            
+            if (itemType == "image" || itemType == "report") {
+                m_pendingThumbnailPaths.append(filePath);
+                m_totalThumbnails++;
+                
+                // Create placeholder thumbnail item
+                QListWidgetItem* thumbnailItem = new QListWidgetItem;
+                thumbnailItem->setData(Qt::UserRole, filePath);
+                thumbnailItem->setData(Qt::UserRole + 1, itemType); // Store item type for later use
+                thumbnailItem->setIcon(QIcon(createLoadingThumbnail()));
+                
+                // Force specific item size to prevent full-width stretching
+                thumbnailItem->setSizeHint(QSize(250, 180));
+                
+                // Don't set text until thumbnail is generated to avoid duplicate display
+                thumbnailItem->setText("");
+                m_thumbnailList->addItem(thumbnailItem);
+            }
+        }
+        ++it;
+    }
+    
+    qDebug() << "Found" << m_totalThumbnails << "images for thumbnail generation";
+    
+    // Start background thumbnail generation if we have images
+    if (m_totalThumbnails > 0) {
+        generateThumbnailsInBackground();
+    } else {
+        // Show panel immediately if no thumbnails to generate
+        m_thumbnailPanel->setVisible(true);
+    }
+}
+
+void DicomViewer::generateThumbnailsInBackground()
+{
+    // Create and start background thread for thumbnail generation
+    m_thumbnailThread = QThread::create([this]() {
+        for (const QString& filePath : m_pendingThumbnailPaths) {
+            try {
+                // Determine item type from tree widget
+                QString itemType = "image"; // Default
+                QTreeWidgetItemIterator it(m_dicomTree);
+                while (*it) {
+                    QVariantList userData = (*it)->data(0, Qt::UserRole).toList();
+                    if (userData.size() >= 2 && userData[1].toString() == filePath) {
+                        itemType = userData[0].toString();
+                        break;
+                    }
+                    ++it;
+                }
+                
+                // Generate thumbnail on background thread
+                QPixmap thumbnail;
+                QString instanceNumber = "1"; // Default fallback for metadata
+                
+                if (itemType == "report") {
+                    // Generate special thumbnail for reports
+                    thumbnail = createReportThumbnail(filePath);
+                    instanceNumber = "RPT"; // Special identifier for reports
+                } else if (m_dicomReader) {
+                    QPixmap originalPixmap = convertDicomFrameToPixmap(filePath, 0);
+                    if (!originalPixmap.isNull()) {
+                        // Scale image to fit the new smaller thumbnail size
+                        QPixmap scaledPixmap = originalPixmap.scaled(180, 120, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                        
+                        QPixmap finalThumbnail(190, 150);
+                        finalThumbnail.fill(QColor(42, 42, 42));
+                        
+                        QPainter painter(&finalThumbnail);
+                        painter.setRenderHint(QPainter::Antialiasing);
+                        
+                        // Center and draw the scaled image
+                        QRect imageRect((finalThumbnail.width() - scaledPixmap.width()) / 2, 15,
+                                       scaledPixmap.width(), scaledPixmap.height());
+                        painter.drawPixmap(imageRect, scaledPixmap);
+                        
+                        // Extract instance number from DICOM metadata
+                        int frameCount = 1;
+                        
+                        // Create a temporary frame processor to avoid conflicts
+                        DicomFrameProcessor tempProcessor;
+                        if (tempProcessor.loadDicomFile(filePath)) {
+                            frameCount = static_cast<int>(tempProcessor.getNumberOfFrames());
+                            
+                            // Get actual Instance Number from DICOM tag (0020,0013)
+                            QString dicomInstanceNumber = tempProcessor.getDicomTagValue("0020,0013");
+                            if (!dicomInstanceNumber.isEmpty()) {
+                                instanceNumber = dicomInstanceNumber;
+                            }
+                        }
+                        
+                        // Create top overlay bar with background
+                        painter.fillRect(0, 0, finalThumbnail.width(), 20, QColor(0, 0, 0, 180));
+                        
+                        // Draw frame count at top-left
+                        painter.setPen(QColor(255, 255, 255));
+                        painter.setFont(QFont("Arial", 11, QFont::Bold));
+                        painter.drawText(5, 14, QString("%1").arg(frameCount));
+                        
+                        // Draw instance number in center
+                        QString centerText = instanceNumber;
+                        QFontMetrics fm(painter.font());
+                        int textWidth = fm.horizontalAdvance(centerText);
+                        painter.drawText((finalThumbnail.width() - textWidth) / 2, 14, centerText);
+                        
+                        // Load and draw appropriate PNG icon at top-right
+                        QString iconPath = (frameCount > 1) 
+                            ? "DicomViewer_CPP/resources/icons/AcquisitionHeader.png"  // Multi-frame
+                            : "DicomViewer_CPP/resources/icons/Camera.png";           // Single frame
+                        
+                        QPixmap iconPixmap(iconPath);
+                        if (iconPixmap.isNull()) {
+                            // Try absolute path if relative doesn't work
+                            QString absoluteIconPath = (frameCount > 1) 
+                                ? "d:/Repos/EikonDicomViewer/DicomViewer_CPP/resources/icons/AcquisitionHeader.png"
+                                : "d:/Repos/EikonDicomViewer/DicomViewer_CPP/resources/icons/Camera.png";
+                            iconPixmap.load(absoluteIconPath);
+                        }
+                        
+                        if (!iconPixmap.isNull()) {
+                            // Scale icon to proper size (16x16 for top overlay)
+                            QPixmap scaledIcon = iconPixmap.scaled(16, 16, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                            painter.drawPixmap(finalThumbnail.width() - 20, 2, scaledIcon);
+                            qDebug() << "Icon loaded successfully:" << iconPath;
+                        } else {
+                            // Fallback: draw a simple text icon
+                            painter.setPen(QColor(100, 149, 237));
+                            painter.setFont(QFont("Arial", 10, QFont::Bold));
+                            QString fallbackIcon = (frameCount > 1) ? "M" : "S";
+                            painter.drawText(finalThumbnail.width() - 18, 14, fallbackIcon);
+                            qDebug() << "Icon failed to load, using fallback:" << iconPath;
+                        }
+                        
+                        painter.end();
+                        thumbnail = finalThumbnail;
+                    }
+                }
+                
+                // Emit signal with generated thumbnail and metadata (thread-safe)
+                QMetaObject::invokeMethod(this, [this, filePath, thumbnail, instanceNumber]() {
+                    onThumbnailGeneratedWithMetadata(filePath, thumbnail, instanceNumber);
+                }, Qt::QueuedConnection);
+                
+            } catch (const std::exception& e) {
+                qDebug() << "Error generating thumbnail for" << filePath << ":" << e.what();
+            }
+        }
+        
+        // Signal completion
+        QMetaObject::invokeMethod(this, [this]() {
+            onAllThumbnailsGenerated();
+        }, Qt::QueuedConnection);
+    });
+    
+    m_thumbnailThread->start();
+}
+
+QPixmap DicomViewer::createLoadingThumbnail()
+{
+    QPixmap loadingPixmap(190, 150);
+    loadingPixmap.fill(QColor(60, 60, 60));
+    
+    QPainter painter(&loadingPixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    
+    // Draw loading indicator
+    painter.setPen(QColor(200, 200, 200));
+    painter.setFont(QFont("Arial", 11));
+    
+    QRect textRect = loadingPixmap.rect();
+    painter.drawText(textRect, Qt::AlignCenter, "Loading...");
+    
+    // Draw simple loading animation rectangle
+    painter.setPen(QPen(QColor(100, 149, 237), 2));
+    painter.drawRect(5, 15, 180, 120);
+    
+    return loadingPixmap;
+}
+
+QPixmap DicomViewer::createFrameTypeIcon(int frameCount)
+{
+    QPixmap icon(20, 16);
+    icon.fill(Qt::transparent);
+    
+    QPainter painter(&icon);
+    painter.setRenderHint(QPainter::Antialiasing);
+    
+    if (frameCount > 1) {
+        // Multi-frame icon (film strip style)
+        painter.setPen(QPen(QColor(100, 220, 100), 2));
+        painter.fillRect(2, 2, 12, 8, QColor(100, 220, 100, 100));
+        painter.drawRect(2, 2, 12, 8);
+        painter.fillRect(5, 5, 12, 8, QColor(100, 220, 100, 150));
+        painter.drawRect(5, 5, 12, 8);
+    } else {
+        // Single frame icon (camera style)
+        painter.setPen(QPen(QColor(220, 220, 100), 2));
+        painter.fillRect(3, 3, 14, 10, QColor(220, 220, 100, 150));
+        painter.drawRect(3, 3, 14, 10);
+        painter.drawEllipse(6, 6, 4, 4);
+    }
+    
+    return icon;
+}
+
+QPixmap DicomViewer::createReportThumbnail(const QString& filePath)
+{
+    QPixmap reportThumbnail(190, 150);
+    reportThumbnail.fill(QColor(42, 42, 42));
+    
+    QPainter painter(&reportThumbnail);
+    painter.setRenderHint(QPainter::Antialiasing);
+    
+    // Create a document-style background
+    painter.fillRect(15, 25, 160, 110, QColor(240, 240, 240));
+    painter.setPen(QPen(QColor(200, 200, 200), 1));
+    painter.drawRect(15, 25, 160, 110);
+    
+    // Draw document lines to simulate text
+    painter.setPen(QPen(QColor(180, 180, 180), 1));
+    for (int i = 0; i < 6; ++i) {
+        int y = 35 + i * 12;
+        painter.drawLine(20, y, 170, y);
+    }
+    
+    // Draw report icon/symbol in the center
+    painter.setPen(QPen(QColor(100, 149, 237), 3));
+    painter.setFont(QFont("Arial", 20, QFont::Bold));
+    painter.drawText(QRect(15, 25, 160, 110), Qt::AlignCenter, "SR");
+    
+    // Get report metadata
+    QString reportType = "Structure Report";
+    QString instanceNumber = "RPT";
+    
+    // Try to extract more specific information from the file
+    try {
+        DicomFrameProcessor tempProcessor;
+        if (tempProcessor.loadDicomFile(filePath)) {
+            // Get Instance Number from DICOM tag (0020,0013)
+            QString dicomInstanceNumber = tempProcessor.getDicomTagValue("0020,0013");
+            if (!dicomInstanceNumber.isEmpty()) {
+                instanceNumber = dicomInstanceNumber;
+            }
+            
+            // Try to get more specific report type from other tags if available
+            QString seriesDescription = tempProcessor.getDicomTagValue("0008,103E");
+            if (!seriesDescription.isEmpty()) {
+                reportType = seriesDescription;
+                // Truncate if too long
+                if (reportType.length() > 15) {
+                    reportType = reportType.left(12) + "...";
+                }
+            }
+        }
+    } catch (...) {
+        // Use default values if DICOM reading fails
+    }
+    
+    // Create top overlay bar with background
+    painter.fillRect(0, 0, reportThumbnail.width(), 20, QColor(0, 0, 0, 180));
+    
+    // Draw "DOC" at top-left to indicate document type
+    painter.setPen(QColor(255, 255, 255));
+    painter.setFont(QFont("Arial", 11, QFont::Bold));
+    painter.drawText(5, 14, "DOC");
+    
+    // Draw instance number in center
+    QFontMetrics fm(painter.font());
+    int textWidth = fm.horizontalAdvance(instanceNumber);
+    painter.drawText((reportThumbnail.width() - textWidth) / 2, 14, instanceNumber);
+    
+    // Load and draw report/list icon at top-right
+    QString iconPath = "DicomViewer_CPP/resources/icons/List.png";
+    QPixmap iconPixmap(iconPath);
+    if (iconPixmap.isNull()) {
+        // Try absolute path if relative doesn't work
+        QString absoluteIconPath = "d:/Repos/EikonDicomViewer/DicomViewer_CPP/resources/icons/List.png";
+        iconPixmap.load(absoluteIconPath);
+    }
+    
+    if (!iconPixmap.isNull()) {
+        // Scale icon to proper size (16x16 for top overlay)
+        QPixmap scaledIcon = iconPixmap.scaled(16, 16, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        painter.drawPixmap(reportThumbnail.width() - 20, 2, scaledIcon);
+    } else {
+        // Fallback: draw a simple text icon
+        painter.setPen(QColor(100, 149, 237));
+        painter.setFont(QFont("Arial", 10, QFont::Bold));
+        painter.drawText(reportThumbnail.width() - 18, 14, "R");
+    }
+    
+    // Draw report type at the bottom
+    painter.fillRect(0, reportThumbnail.height() - 20, reportThumbnail.width(), 20, QColor(0, 0, 0, 180));
+    painter.setPen(QColor(255, 255, 255));
+    painter.setFont(QFont("Arial", 9));
+    int typeTextWidth = fm.horizontalAdvance(reportType);
+    painter.drawText((reportThumbnail.width() - typeTextWidth) / 2, reportThumbnail.height() - 6, reportType);
+    
+    return reportThumbnail;
+}
+
 void DicomViewer::onTreeItemSelected(QTreeWidgetItem *current, QTreeWidgetItem *previous)
 {
     Q_UNUSED(previous)
@@ -1539,6 +1979,28 @@ void DicomViewer::onTreeItemSelected(QTreeWidgetItem *current, QTreeWidgetItem *
         if (itemType == "image") {
             // This is an actual DICOM image
             loadDicomImage(filePath);
+            
+            // Update thumbnail selection and ensure thumbnails are loaded
+            if (m_thumbnailList) {
+                // First ensure thumbnails are populated
+                if (m_thumbnailList->count() == 0) {
+                    // Store the selection to apply after thumbnails are loaded
+                    m_pendingTreeSelection = filePath;
+                    updateThumbnailPanel();
+                } else {
+                    // Clear any pending selection since thumbnails are ready
+                    m_pendingTreeSelection.clear();
+                    
+                    // Find and select the corresponding thumbnail
+                    for (int i = 0; i < m_thumbnailList->count(); ++i) {
+                        QListWidgetItem* item = m_thumbnailList->item(i);
+                        if (item && item->data(Qt::UserRole).toString() == filePath) {
+                            m_thumbnailList->setCurrentItem(item);
+                            break;
+                        }
+                    }
+                }
+            }
         } else if (itemType == "report") {
             // This is a Structured Report document
             m_imageLabel->setText("Selected: " + current->text(0));
@@ -2170,6 +2632,9 @@ void DicomViewer::loadDicomDir(const QString& dicomdirPath)
         
         // Populate tree widget using DicomReader
         m_dicomReader->populateTreeWidget(m_dicomTree);
+        
+        // Update thumbnail panel after tree population
+        updateThumbnailPanel();
         
         qDebug() << "[LOAD DICOMDIR] Tree populated, about to call detectAndStartDvdCopy()";
         
@@ -5026,6 +5491,9 @@ void DicomViewer::onCopyProgressTimeout()
         // Update the tree display to reflect new file availability
         m_dicomReader->populateTreeWidget(m_dicomTree);
         
+        // Update thumbnail panel after tree refresh
+        updateThumbnailPanel();
+        
         // Update the header to show current progress
         int totalPatients = m_dicomReader->getTotalPatients();
         int totalImages = m_dicomReader->getTotalImages();
@@ -5959,4 +6427,95 @@ void DicomViewer::autoSelectFirstCompletedImage()
     qDebug() << "[AUTO SELECT] No completed images found yet for auto-selection";
 }
 
-#include "dicomviewer.moc"
+void DicomViewer::onThumbnailGeneratedWithMetadata(const QString& filePath, const QPixmap& thumbnail, const QString& instanceNumber)
+{
+    // Find the corresponding list item and update it
+    for (int i = 0; i < m_thumbnailList->count(); ++i) {
+        QListWidgetItem* item = m_thumbnailList->item(i);
+        if (item && item->data(Qt::UserRole).toString() == filePath) {
+            if (!thumbnail.isNull()) {
+                item->setIcon(QIcon(thumbnail));
+                
+                // Ensure consistent item size to prevent stretching - updated for new thumbnail size
+                item->setSizeHint(QSize(190, 150));
+                
+                // Store metadata in item data for later use
+                QVariantList metadata;
+                metadata << filePath << instanceNumber;
+                item->setData(Qt::UserRole + 1, metadata);
+                
+                // Don't set display text - instance number is already drawn in the thumbnail overlay
+                // item->setText(instanceNumber);  // Removed to prevent duplicate instance number display
+                
+                qDebug() << "Updated thumbnail for:" << QFileInfo(filePath).baseName() << "with instance number:" << instanceNumber;
+            }
+            break;
+        }
+    }
+    
+    m_completedThumbnails++;
+    qDebug() << "Thumbnail progress:" << m_completedThumbnails << "of" << m_totalThumbnails;
+}
+
+void DicomViewer::onThumbnailGenerated(const QString& filePath, const QPixmap& thumbnail)
+{
+    // Find the corresponding list item and update it
+    for (int i = 0; i < m_thumbnailList->count(); ++i) {
+        QListWidgetItem* item = m_thumbnailList->item(i);
+        if (item && item->data(Qt::UserRole).toString() == filePath) {
+            if (!thumbnail.isNull()) {
+                item->setIcon(QIcon(thumbnail));
+                
+                // Ensure consistent item size to prevent stretching
+                item->setSizeHint(QSize(250, 180));
+                
+                // Use instance number from thumbnail data (passed from background thread)
+                // Extract from item data that was set during thumbnail generation
+                QVariantList thumbnailData = item->data(Qt::UserRole + 1).toList();
+                QString instanceNumber = "1"; // Default fallback
+                
+                if (thumbnailData.size() > 1) {
+                    instanceNumber = thumbnailData[1].toString();
+                }
+                
+                item->setText(instanceNumber);
+                
+                qDebug() << "Updated thumbnail for:" << QFileInfo(filePath).baseName() << "with instance number:" << instanceNumber;
+            }
+            break;
+        }
+    }
+    
+    m_completedThumbnails++;
+    qDebug() << "Thumbnail progress:" << m_completedThumbnails << "of" << m_totalThumbnails;
+}
+
+void DicomViewer::onAllThumbnailsGenerated()
+{
+    qDebug() << "All thumbnails generated! Showing thumbnail panel.";
+    
+    // Clean up thread
+    if (m_thumbnailThread) {
+        m_thumbnailThread->quit();
+        m_thumbnailThread->wait();
+        m_thumbnailThread->deleteLater();
+        m_thumbnailThread = nullptr;
+    }
+    
+    // Show the thumbnail panel now that all thumbnails are ready
+    m_thumbnailPanel->setVisible(true);
+    
+    // Apply pending tree selection if any
+    if (!m_pendingTreeSelection.isEmpty() && m_thumbnailList) {
+        for (int i = 0; i < m_thumbnailList->count(); ++i) {
+            QListWidgetItem* item = m_thumbnailList->item(i);
+            if (item && item->data(Qt::UserRole).toString() == m_pendingTreeSelection) {
+                m_thumbnailList->setCurrentItem(item);
+                break;
+            }
+        }
+        m_pendingTreeSelection.clear();
+    }
+    
+    qDebug() << "Thumbnail panel is now visible with" << m_completedThumbnails << "thumbnails";
+}

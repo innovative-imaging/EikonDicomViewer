@@ -10,6 +10,7 @@
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QFrame>
 #include <QtWidgets/QTextEdit>
+#include <QtWidgets/QListWidget>
 #include <QtWidgets/QFileDialog>
 #include <QtWidgets/QStackedWidget>
 #include <QtWidgets/QComboBox>
@@ -142,6 +143,11 @@ private slots:
     void onCurrentFrameChanged(int frameIndex, int totalFrames);
     void onFrameRequested(int frameIndex);
     
+    // Thumbnail generation slots
+    void onThumbnailGenerated(const QString& filePath, const QPixmap& thumbnail);
+    void onThumbnailGeneratedWithMetadata(const QString& filePath, const QPixmap& thumbnail, const QString& instanceNumber);
+    void onAllThumbnailsGenerated();
+    
     // DVD copy worker slots
     void onWorkerReady();
     void onDvdDetected(const QString& dvdPath);
@@ -214,6 +220,7 @@ private slots:
     
     // Tree widget slots
     void onTreeItemSelected(QTreeWidgetItem *current, QTreeWidgetItem *previous);
+    void onThumbnailItemSelected(QListWidgetItem* current, QListWidgetItem* previous);
     void expandFirstItems();
 
 private:
@@ -229,6 +236,13 @@ private:
     void createCloseButton();
     QWidget* createImageWidget();
     void createOverlayLabels(QWidget* parent);
+    void createThumbnailPanel();
+    void updateThumbnailPanel();
+    void generateThumbnail(const QString& filePath, QListWidgetItem* item);
+    void generateThumbnailsInBackground();
+    QPixmap createLoadingThumbnail();
+    QPixmap createReportThumbnail(const QString& filePath);
+    QPixmap createFrameTypeIcon(int frameCount);
     void installEventFilters();
     
     // Display methods
@@ -311,6 +325,16 @@ private:
     // Left sidebar
     QFrame* m_leftSidebar;
     QTreeWidget* m_dicomTree;
+    
+    // Thumbnail panel  
+    QFrame* m_thumbnailPanel;
+    QListWidget* m_thumbnailList;
+    QString m_pendingTreeSelection;  // Track tree selection made before thumbnails loaded
+    QThread* m_thumbnailThread;
+    QStringList m_pendingThumbnailPaths;
+    QMutex m_thumbnailMutex;
+    int m_completedThumbnails;
+    int m_totalThumbnails;
     
     // Main content area
     QStackedWidget* m_mainStack;

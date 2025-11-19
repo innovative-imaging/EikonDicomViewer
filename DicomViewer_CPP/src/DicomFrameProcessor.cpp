@@ -764,3 +764,38 @@ bool DicomFrameProcessor::preDecompressAllFrames()
     return false;
 #endif
 }
+
+QString DicomFrameProcessor::getDicomTagValue(const QString& tag) const
+{
+#ifdef HAVE_DCMTK
+    if (!m_fileFormat) return QString();
+    
+    DcmDataset* dataset = m_fileFormat->getDataset();
+    if (!dataset) return QString();
+    
+    // Parse tag string (e.g., "0020,0013")
+    QStringList parts = tag.split(',');
+    if (parts.size() != 2) return QString();
+    
+    bool ok1, ok2;
+    unsigned int group = parts[0].toUInt(&ok1, 16);
+    unsigned int element = parts[1].toUInt(&ok2, 16);
+    
+    if (!ok1 || !ok2) return QString();
+    
+    DcmTag dcmTag(group, element);
+    DcmElement* dcmElement = nullptr;
+    
+    if (dataset->findAndGetElement(dcmTag, dcmElement).good() && dcmElement) {
+        OFString value;
+        if (dcmElement->getOFString(value, 0).good()) {
+            return QString::fromLatin1(value.c_str());
+        }
+    }
+    
+    return QString();
+#else
+    Q_UNUSED(tag)
+    return QString();
+#endif
+}
