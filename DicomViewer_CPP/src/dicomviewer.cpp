@@ -1646,6 +1646,12 @@ void DicomViewer::updateThumbnailPanel()
         return;
     }
     
+    // Prevent updating thumbnails if already in progress
+    if (m_thumbnailThread && m_thumbnailThread->isRunning()) {
+        qDebug() << "Thumbnail generation already in progress - skipping update";
+        return;
+    }
+    
     qDebug() << "Updating thumbnail panel...";
     
     // Clear existing thumbnails and reset counters
@@ -1700,6 +1706,23 @@ void DicomViewer::generateThumbnailsInBackground()
     m_thumbnailThread = QThread::create([this]() {
         for (const QString& filePath : m_pendingThumbnailPaths) {
             try {
+                // Check if file is accessible before trying to generate thumbnail
+                QFileInfo fileInfo(filePath);
+                if (!fileInfo.exists() || !fileInfo.isReadable()) {
+                    qDebug() << "Skipping thumbnail generation for inaccessible file:" << filePath;
+                    continue;
+                }
+                
+                // For DVD autorun scenario: Check if file is still being copied
+                // Skip thumbnail generation if copy is in progress and file is not completed
+                QString filename = fileInfo.fileName();
+                bool fileIsCompleted = m_fullyCompletedFiles.contains(filename);
+                
+                if (m_copyInProgress && !fileIsCompleted) {
+                    qDebug() << "Skipping thumbnail generation for file still being copied:" << filename;
+                    continue;
+                }
+                
                 // Determine item type from tree widget
                 QString itemType = "image"; // Default
                 QTreeWidgetItemIterator it(m_dicomTree);
@@ -1717,11 +1740,24 @@ void DicomViewer::generateThumbnailsInBackground()
                 QString instanceNumber = "1"; // Default fallback for metadata
                 
                 if (itemType == "report") {
-                    // Generate special thumbnail for reports
-                    thumbnail = createReportThumbnail(filePath);
-                    instanceNumber = "RPT"; // Special identifier for reports
+                    // Generate special thumbnail for reports (safer as it doesn't read pixel data)
+                    try {
+                        thumbnail = createReportThumbnail(filePath);
+                        instanceNumber = "RPT"; // Special identifier for reports
+                    } catch (...) {
+                        qDebug() << "Error creating report thumbnail for:" << filePath;
+                        continue; // Skip this file and continue with next
+                    }
                 } else if (m_dicomReader) {
-                    QPixmap originalPixmap = convertDicomFrameToPixmap(filePath, 0);
+                    // Add extra protection around DICOM file access
+                    QPixmap originalPixmap;
+                    try {
+                        originalPixmap = convertDicomFrameToPixmap(filePath, 0);
+                    } catch (...) {
+                        qDebug() << "Error converting DICOM frame to pixmap for:" << filePath;
+                        continue; // Skip this file and continue with next
+                    }
+                    
                     if (!originalPixmap.isNull()) {
                         // Scale image to fit the new smaller thumbnail size
                         QPixmap scaledPixmap = originalPixmap.scaled(180, 120, Qt::KeepAspectRatio, Qt::SmoothTransformation);
@@ -1741,15 +1777,21 @@ void DicomViewer::generateThumbnailsInBackground()
                         int frameCount = 1;
                         
                         // Create a temporary frame processor to avoid conflicts
-                        DicomFrameProcessor tempProcessor;
-                        if (tempProcessor.loadDicomFile(filePath)) {
-                            frameCount = static_cast<int>(tempProcessor.getNumberOfFrames());
-                            
-                            // Get actual Instance Number from DICOM tag (0020,0013)
-                            QString dicomInstanceNumber = tempProcessor.getDicomTagValue("0020,0013");
-                            if (!dicomInstanceNumber.isEmpty()) {
-                                instanceNumber = dicomInstanceNumber;
+                        // Add extra protection around DICOM metadata reading
+                        try {
+                            DicomFrameProcessor tempProcessor;
+                            if (tempProcessor.loadDicomFile(filePath)) {
+                                frameCount = static_cast<int>(tempProcessor.getNumberOfFrames());
+                                
+                                // Get actual Instance Number from DICOM tag (0020,0013)
+                                QString dicomInstanceNumber = tempProcessor.getDicomTagValue("0020,0013");
+                                if (!dicomInstanceNumber.isEmpty()) {
+                                    instanceNumber = dicomInstanceNumber;
+                                }
                             }
+                        } catch (...) {
+                            qDebug() << "Error reading DICOM metadata for thumbnail, using defaults:" << filePath;
+                            // Continue with default values (frameCount=1, instanceNumber="1")
                         }
                         
                         // Create top overlay bar with background
@@ -6009,6 +6051,10 @@ void DicomViewer::onCopyCompleted(bool success)
         // Update status bar to show completion
         updateStatusBar("Media loading completed", -1);
         
+        // Regenerate thumbnails now that files are copied and accessible
+        qDebug() << "DVD copy completed - regenerating thumbnails for copied files";
+        updateThumbnailPanel();
+        
         // Start ffmpeg copy in a separate thread after DICOM files are copied and status updated
         QThread* ffmpegCopyThread = QThread::create([this]() {
             copyFfmpegExe();
@@ -6492,7 +6538,7 @@ void DicomViewer::onThumbnailGenerated(const QString& filePath, const QPixmap& t
 
 void DicomViewer::onAllThumbnailsGenerated()
 {
-    qDebug() << "All thumbnails generated! Showing thumbnail panel.";
+    qDebug() << "Thumbnail generation completed! Showing thumbnail panel.";
     
     // Clean up thread
     if (m_thumbnailThread) {
@@ -6502,7 +6548,8 @@ void DicomViewer::onAllThumbnailsGenerated()
         m_thumbnailThread = nullptr;
     }
     
-    // Show the thumbnail panel now that all thumbnails are ready
+    // Show the thumbnail panel even if some thumbnails couldn't be generated
+    // (this handles the DVD autorun case where some files may not be accessible yet)
     m_thumbnailPanel->setVisible(true);
     
     // Apply pending tree selection if any
@@ -6517,5 +6564,23 @@ void DicomViewer::onAllThumbnailsGenerated()
         m_pendingTreeSelection.clear();
     }
     
-    qDebug() << "Thumbnail panel is now visible with" << m_completedThumbnails << "thumbnails";
+    // Count how many thumbnails were actually generated vs loading placeholders
+    int actualThumbnails = 0;
+    for (int i = 0; i < m_thumbnailList->count(); ++i) {
+        QListWidgetItem* item = m_thumbnailList->item(i);
+        if (item) {
+            QIcon icon = item->icon();
+            // Check if this is still a loading placeholder (basic check)
+            if (!icon.isNull()) {
+                actualThumbnails++;
+            }
+        }
+    }
+    
+    qDebug() << "Thumbnail panel is now visible with" << actualThumbnails << "actual thumbnails out of" << m_thumbnailList->count() << "items";
+    
+    // If running from DVD and some thumbnails failed, they will be regenerated when copy completes
+    if (m_copyInProgress && actualThumbnails < m_thumbnailList->count()) {
+        qDebug() << "Some thumbnails missing due to DVD copy in progress - will regenerate after copy completion";
+    }
 }
