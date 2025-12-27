@@ -165,6 +165,7 @@ void DvdCopyWorker::onRobocopyFinished(int exitCode, QProcess::ExitStatus exitSt
         m_robocopyProcess = nullptr;
     }
     
+    debugLog(QString("*** EMITTING copyCompleted signal with success: %1 ***").arg(success));
     emit copyCompleted(success);
 }
 
@@ -310,13 +311,22 @@ void DvdCopyWorker::startRobocopy(const QString& dvdPath)
     QStringList arguments;
     arguments << sourceDir << destDir;
     arguments << "/E";           // Copy subdirectories including empty ones
-    arguments << "/Z";           // Restartable mode
-    arguments << "/R:1";         // 1 retry on failure
-    arguments << "/W:0";         // 0 wait time between retries
+    arguments << "/Z";           // Restartable mode - CRITICAL for optical media
+    arguments << "/R:3";         // 3 retries on failure (increased for physical DVDs)
+    arguments << "/W:5";         // 5 second wait time between retries (increased for optical)
     arguments << "/MT:1";        // Single-threaded for DVD compatibility
     arguments << "/V";           // Verbose output
     arguments << "/TEE";         // Output to console AND log file
     arguments << "/LOG:" + logFilePath;  // Log to file
+    // Progress optimization: Keep essential progress info, remove verbose details
+    arguments << "/NDL";         // No directory logging (reduces log overhead)
+    arguments << "/NC";          // No class info (reduces log overhead)  
+    arguments << "/NJS";         // No job summary (reduces log overhead)
+    // Keep /NFL and /NS removed to preserve file progress information for UI
+    
+    // Physical DVD optimizations
+    arguments << "/COPY:DT";     // Copy only data and timestamps (not security/ownership)
+    arguments << "/DCOPY:T";     // Copy directory timestamps only
     
 #ifdef ENABLE_DVD_SPEED_THROTTLING
     // Add bandwidth throttling to simulate DVD/CD read speeds
@@ -343,7 +353,7 @@ void DvdCopyWorker::startRobocopy(const QString& dvdPath)
     m_robocopyProcess->start("robocopy", arguments);
     
     // Wait a moment for the process to start and verify it's running
-    if (m_robocopyProcess->waitForStarted(2000)) {
+    if (m_robocopyProcess->waitForStarted(5000)) {  // Increased timeout to 5 seconds for physical DVDs
         qDebugT() << "[ROBOCOPY] Process started successfully, PID:" << m_robocopyProcess->processId();
 #ifdef ENABLE_DVD_COPY_LOGGING
         qCDebug(dvdCopy) << "Robocopy process started, waiting for output...";
@@ -354,6 +364,11 @@ void DvdCopyWorker::startRobocopy(const QString& dvdPath)
         startProgressMonitoring();
     } else {
         qDebug() << "[ERROR] Failed to start robocopy process:" << m_robocopyProcess->errorString();
+        qDebug() << "[ERROR] Process state:" << m_robocopyProcess->state();
+        qDebug() << "[ERROR] Exit code:" << m_robocopyProcess->exitCode();
+        qDebug() << "[ERROR] Exit status:" << m_robocopyProcess->exitStatus();
+        qDebug() << "[ERROR] Source directory exists:" << QDir(sourceDir).exists();
+        qDebug() << "[ERROR] Destination directory exists:" << QDir(destDir).exists();
         emit workerError("Failed to start robocopy process: " + m_robocopyProcess->errorString());
     }
 }
@@ -503,9 +518,9 @@ void DvdCopyWorker::startProgressMonitoring()
     
     debugLog(QString("Monitoring progress for %1 files").arg(m_expectedFiles.size()));
     
-    // Start timer to check progress every 500ms
+    // Start timer to check progress every 250ms for more responsive UI
     if (m_progressTimer) {
-        m_progressTimer->start(500);
+        m_progressTimer->start(250);
     }
 }
 
@@ -561,6 +576,7 @@ void DvdCopyWorker::checkFileProgress()
                                     
                                     debugLog(QString("File completed (from log): %1").arg(fileName));
                                     emit fileProgress(fileName, 100);
+                                    emit fileCompleted(fileName);  // NEW: Signal file completion
                                 }
                                 break;
                             }
@@ -591,6 +607,7 @@ void DvdCopyWorker::checkFileProgress()
                 
                 debugLog(QString("File completed (filesystem): %1").arg(fileName));
                 emit fileProgress(fileName, 100);
+                emit fileCompleted(fileName);  // NEW: Signal file completion
             }
         }
     }
@@ -694,6 +711,13 @@ void DvdCopyWorker::copyNextFile()
         // All files completed
         debugLog("=== All files copied successfully ===");
         debugLog("Sequential robocopy completed successfully");
+        
+        // Emit fileCompleted signal for each completed file
+        for (const QString& completedFile : m_completedFiles) {
+            emit fileCompleted(completedFile);
+        }
+        
+        debugLog("*** EMITTING copyCompleted signal (sequential copy success) ***");
         emit copyCompleted(true);
         return;
     }
@@ -782,6 +806,7 @@ void DvdCopyWorker::startSingleFileRobocopy(const QString& fileName)
                 if (success) {
                     // Mark current file as 100% complete
                     emit fileProgress(m_currentFileName, 100);
+                    emit fileCompleted(m_currentFileName);  // NEW: Signal file completion
                     m_completedFiles.append(m_currentFileName);
                     
                     // Move to next file

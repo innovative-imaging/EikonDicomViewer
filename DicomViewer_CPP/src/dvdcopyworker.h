@@ -35,6 +35,7 @@ signals:
     void copyCompleted(bool success);
     void workerError(const QString& error);
     void statusChanged(const QString& status);
+    void fileCompleted(const QString& fileName);  // NEW: Individual file completion
 
 private slots:
     void onRobocopyOutput();

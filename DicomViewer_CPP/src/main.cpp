@@ -70,11 +70,14 @@ int main(int argc, char *argv[])
     app.setApplicationVersion("1.0.0");
     app.setOrganizationName("Eikon Imaging");
     
-    // Parse command line arguments for source drive
+    // Parse command line arguments for source drive and dicomdir
     QString sourceDrive;
+    QString dicomdirPath;
     QStringList args = app.arguments();
     
-    for (const QString& arg : args) {
+    for (int i = 0; i < args.size(); ++i) {
+        const QString& arg = args[i];
+        
         if (arg.startsWith("--source-drive=")) {
             sourceDrive = arg.mid(15); // Remove "--source-drive=" prefix
             
@@ -91,7 +94,10 @@ int main(int argc, char *argv[])
                 std::cout << "Removed quotes, result: " << sourceDrive.toStdString() << std::endl;
             }
             std::cout << "Final source drive parameter: " << sourceDrive.toStdString() << std::endl;
-            break;
+        }
+        else if (arg == "-dicomdir" && i + 1 < args.size()) {
+            dicomdirPath = args[i + 1];
+            std::cout << "DICOMDIR path specified: " << dicomdirPath.toStdString() << std::endl;
         }
     }
     
@@ -99,6 +105,12 @@ int main(int argc, char *argv[])
     DicomViewer viewer(nullptr, sourceDrive);
     
     viewer.show();
+    
+    // If a DICOMDIR path was specified, load it after showing the window
+    if (!dicomdirPath.isEmpty()) {
+        std::cout << "Loading specified DICOMDIR: " << dicomdirPath.toStdString() << std::endl;
+        viewer.loadDicomdirFile(dicomdirPath);
+    }
     
     return app.exec();
 }

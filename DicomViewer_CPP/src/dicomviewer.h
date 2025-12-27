@@ -34,6 +34,8 @@
 #include <QtCore/QTimer>
 #include <QtCore/QThread>
 #include <QtCore/QMutex>
+#include <QtCore/QAtomicInt>
+#include <QtCore/QQueue>
 #include <QtCore/QTextStream>
 #include <QtMultimedia/QMediaRecorder>
 #include <QtMultimedia/QMediaCaptureSession>
@@ -125,6 +127,9 @@ class DicomViewer : public QMainWindow
 public:
     DicomViewer(QWidget *parent = nullptr, const QString& sourceDrive = QString());
     ~DicomViewer();
+    
+    // Public method to load DICOMDIR from external code
+    void loadDicomdirFile(const QString& dicomdirPath) { loadDicomDir(dicomdirPath); }
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -222,6 +227,9 @@ private slots:
     void onTreeItemSelected(QTreeWidgetItem *current, QTreeWidgetItem *previous);
     void onThumbnailItemSelected(QListWidgetItem* current, QListWidgetItem* previous);
     void expandFirstItems();
+    
+    // Race condition prevention slots
+    void onFileReadyForThumbnail(const QString& fileName);
 
 private:
     // Framework setup methods
@@ -237,12 +245,15 @@ private:
     QWidget* createImageWidget();
     void createOverlayLabels(QWidget* parent);
     void createThumbnailPanel();
+    void toggleThumbnailPanel();
     void updateThumbnailPanel();
+    void checkAndShowThumbnailPanel();
     void generateThumbnail(const QString& filePath, QListWidgetItem* item);
     void generateThumbnailsInBackground();
     QPixmap createLoadingThumbnail();
     QPixmap createReportThumbnail(const QString& filePath);
     QPixmap createFrameTypeIcon(int frameCount);
+    QListWidgetItem* createPatientSeparator(const QString& patientName);
     void installEventFilters();
     
     // Display methods
@@ -329,12 +340,22 @@ private:
     // Thumbnail panel  
     QFrame* m_thumbnailPanel;
     QListWidget* m_thumbnailList;
+    QPushButton* m_thumbnailToggleButton;    // Toggle button for collapse/expand
+    bool m_thumbnailPanelCollapsed;          // Track collapse state
     QString m_pendingTreeSelection;  // Track tree selection made before thumbnails loaded
     QThread* m_thumbnailThread;
     QStringList m_pendingThumbnailPaths;
     QMutex m_thumbnailMutex;
     int m_completedThumbnails;
     int m_totalThumbnails;
+    
+    // Race condition prevention members
+    QMutex m_dcmtkAccessMutex;           // Protect all DCMTK operations
+    QAtomicInt m_thumbnailGenerationActive;  // 0=idle, 1=active
+    QMap<QString, bool> m_fileReadyStates;   // Track copy completion
+    QMutex m_fileStatesMutex;                // Protect file states map
+    QQueue<QString> m_pendingSelections;     // Queue user clicks during generation
+    QMutex m_pendingSelectionsMutex;         // Protect pending queue
     
     // Main content area
     QStackedWidget* m_mainStack;
@@ -446,6 +467,7 @@ private:
     int m_currentCopyProgress;    // Still used for progress tracking
     bool m_dvdDetectionInProgress; // Prevent multiple simultaneous DVD detection
     bool m_ffmpegCopyCompleted;   // Track if ffmpeg copy has completed
+    bool m_allThumbnailsComplete; // Track if all thumbnails are generated
     QStringList m_completedFiles; // Track files that have reached 100% completion
     QSet<QString> m_fullyCompletedFiles; // Track files that are fully accessible (100% + file exists)
     
