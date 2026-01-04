@@ -1,0 +1,7 @@
+        }
+        ++it;
+    }
+}
+
+// Include MOC file for Q_OBJECT classes defined in this source file
+#include "dicomviewer.moc"

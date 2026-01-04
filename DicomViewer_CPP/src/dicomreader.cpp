@@ -9,6 +9,9 @@
 #include <QtEndian>
 #include <QRegularExpression>
 
+// Simple logging stub to replace logMessage calls
+#define logMessage(level, message) qDebug() << "[" << #level << "]" << message
+
 #ifdef HAVE_DCMTK
 #include "dcmtk/config/osconfig.h"
 #include "dcmtk/dcmdata/dcdicdir.h"
@@ -101,7 +104,7 @@ void DicomReader::populateTreeWidget(QTreeWidget* treeWidget)
 {
     if (!treeWidget) return;
     
-    qDebug() << "##### populateTreeWidget() called - clearing and repopulating tree #####";
+    LOG_DEBUG("##### populateTreeWidget() called - clearing and repopulating tree #####");
     
     treeWidget->clear();
     
@@ -174,13 +177,10 @@ void DicomReader::populateTreeWidget(QTreeWidget* treeWidget)
                         QString filename = pathInfo.fileName();
                         
                         // Debug: Show what we're getting - CRITICAL DEBUG
-                        qDebug() << "************************ TREE POPULATION DEBUG ************************";
-                        qDebug() << "[TREE FILENAME DEBUG]" 
-                                 << "FilePath:" << image.filePath 
-                                 << "Filename:" << filename 
-                                 << "DisplayName:" << image.displayName
-                                 << "FileExists:" << image.fileExists;
-                        qDebug() << "************************ END TREE DEBUG ************************";
+                        LOG_DEBUG("************************ TREE POPULATION DEBUG ************************");
+                        LOG_DEBUG(QString("[TREE FILENAME DEBUG] FilePath: %1, Filename: %2, DisplayName: %3, FileExists: %4")
+                                 .arg(image.filePath).arg(filename).arg(image.displayName).arg(image.fileExists));
+                        LOG_DEBUG("************************ END TREE DEBUG ************************");
                         
                         // ALWAYS use the actual filename from the path if we have one
                         // Don't check file existence - we want to show the real filename even if file doesn't exist yet
@@ -188,10 +188,10 @@ void DicomReader::populateTreeWidget(QTreeWidget* treeWidget)
                             !filename.endsWith(".") && filename.length() > 3) {
                             // Use the actual DICOM filename - this should be the filename from DICOMDIR
                             displayName = filename;
-                            qDebug() << "[TREE] Using actual filename:" << filename;
+                            LOG_DEBUG(QString("[TREE] Using actual filename: %1").arg(filename));
                         } else {
                             // Only fall back to generic names if we really don't have a valid filename
-                            qDebug() << "[TREE] Falling back to generic name for invalid filename:" << filename;
+                            LOG_WARN(QString("[TREE] Falling back to generic name for invalid filename: %1").arg(filename));
                             if (image.instanceNumber > 0) {
                                 displayName = QString("Image_%1").arg(image.instanceNumber, 3, 10, QChar('0'));
                             } else {
@@ -379,7 +379,7 @@ bool DicomReader::parseWithDcmtk(const QString& dicomdirPath)
                             if (inst->findAndGetElement(DCM_ReferencedFileID, fileIdElement).good() && fileIdElement) {
                                 // Check if it's a multi-valued field
                                 Uint32 numValues = fileIdElement->getVM();
-                                qDebug() << "[DICOMDIR MULTI-VALUE] DCM_ReferencedFileID has" << numValues << "values";
+                                LOG_DEBUG(QString("[DICOMDIR MULTI-VALUE] DCM_ReferencedFileID has %1 values").arg(numValues));
                                 
                                 QStringList pathComponents;
                                 for (Uint32 i = 0; i < numValues; i++) {
@@ -388,7 +388,7 @@ bool DicomReader::parseWithDcmtk(const QString& dicomdirPath)
                                         QString componentStr = QString::fromStdString(component.c_str());
                                         if (!componentStr.isEmpty()) {
                                             pathComponents.append(componentStr);
-                                            qDebug() << "[DICOMDIR COMPONENT" << i << "]" << componentStr;
+                                            LOG_DEBUG(QString("[DICOMDIR COMPONENT %1] %2").arg(i).arg(componentStr));
                                         }
                                     }
                                 }
@@ -412,9 +412,12 @@ bool DicomReader::parseWithDcmtk(const QString& dicomdirPath)
                             QString fullPath = m_basePath + "/" + relativePath;
                             fullPath = QDir::toNativeSeparators(fullPath);
                             
-                            qDebug() << "[DICOMDIR DEBUG] FileID from DICOMDIR:" << QString::fromStdString(fileId.c_str())
-                                     << "FullRelativePath:" << fullRelativePath
-                                     << "RelativePath:" << relativePath << "FullPath:" << fullPath;
+                            // CRITICAL FIX: Normalize path to consistent long format to prevent path mismatch crashes
+                            QFileInfo pathNormalizer(fullPath);
+                            fullPath = pathNormalizer.absoluteFilePath(); // Converts short paths (ADMINI~1) to long paths (Administrator)
+                            
+                            logMessage("DEBUG", QString("[DICOMDIR DEBUG] FileID from DICOMDIR: %1, FullRelativePath: %2, RelativePath: %3, FullPath: %4")
+                                     .arg(QString::fromStdString(fileId.c_str())).arg(fullRelativePath).arg(relativePath).arg(fullPath));
                             
                             // Always use the file reference from DICOMDIR, regardless of current file existence
                             // The DICOMDIR contains the authoritative list of what files should exist
@@ -429,8 +432,8 @@ bool DicomReader::parseWithDcmtk(const QString& dicomdirPath)
                                 
                                 // CRITICAL: Debug what filename we'll extract from this path
                                 QString extractedFilename = QFileInfo(fullPath).fileName();
-                                qDebug() << ">>> DICOMDIR PARSE: fullPath=" << fullPath 
-                                         << "extractedFilename=" << extractedFilename;
+                                logMessage("DEBUG", QString(">>> DICOMDIR PARSE: fullPath=%1 extractedFilename=%2")
+                                         .arg(fullPath).arg(extractedFilename));
                                 imageInfo.instanceNumber = !instanceNumberStr.empty() ? 
                                     atoi(instanceNumberStr.c_str()) : seriesInstanceCount;
                                 imageInfo.frameCount = 1;
@@ -443,14 +446,14 @@ bool DicomReader::parseWithDcmtk(const QString& dicomdirPath)
                                     int frameCount = atoi(numberOfFramesStr.c_str());
                                     if (frameCount > 0 && frameCount < 100000) { // Sanity check
                                         imageInfo.frameCount = frameCount;
-                                        qDebug() << "[DICOMDIR FRAMES] File:" << extractedFilename 
-                                                 << "frames from DICOMDIR:" << frameCount;
+                                        logMessage(LOG_DEBUG, QString("[DICOMDIR FRAMES] File: %1 frames from DICOMDIR: %2")
+                                                 .arg(extractedFilename).arg(frameCount));
                                     }
                                 } else if (imageInfo.fileExists) {
                                     // Fallback: get frame count from actual file if DICOMDIR doesn't have it
                                     imageInfo.frameCount = getFrameCountFromFile(fullPath);
-                                    qDebug() << "[FILE FRAMES] File:" << extractedFilename 
-                                             << "frames from file:" << imageInfo.frameCount;
+                                    logMessage(LOG_DEBUG, QString("[FILE FRAMES] File: %1 frames from file: %2")
+                                             .arg(extractedFilename).arg(imageInfo.frameCount));
                                 }
                                 
                                 seriesInfo.images.append(imageInfo);
@@ -475,7 +478,7 @@ bool DicomReader::parseWithDcmtk(const QString& dicomdirPath)
                             if (inst->findAndGetElement(DCM_ReferencedFileID, fileIdElement).good() && fileIdElement) {
                                 // Check if it's a multi-valued field
                                 Uint32 numValues = fileIdElement->getVM();
-                                qDebug() << "[DICOMDIR SR MULTI-VALUE] DCM_ReferencedFileID has" << numValues << "values";
+                                logMessage(LOG_DEBUG, QString("[DICOMDIR SR MULTI-VALUE] DCM_ReferencedFileID has %1 values").arg(numValues));
                                 
                                 QStringList pathComponents;
                                 for (Uint32 i = 0; i < numValues; i++) {
@@ -484,7 +487,7 @@ bool DicomReader::parseWithDcmtk(const QString& dicomdirPath)
                                         QString componentStr = QString::fromStdString(component.c_str());
                                         if (!componentStr.isEmpty()) {
                                             pathComponents.append(componentStr);
-                                            qDebug() << "[DICOMDIR SR COMPONENT" << i << "]" << componentStr;
+                                            logMessage(LOG_DEBUG, QString("[DICOMDIR SR COMPONENT %1] %2").arg(i).arg(componentStr));
                                         }
                                     }
                                 }
@@ -507,6 +510,10 @@ bool DicomReader::parseWithDcmtk(const QString& dicomdirPath)
                             QString relativePath = QString::fromStdString(pathStr);
                             QString fullPath = m_basePath + "/" + relativePath;
                             fullPath = QDir::toNativeSeparators(fullPath);
+                            
+                            // CRITICAL FIX: Normalize path to consistent long format for SR documents too
+                            QFileInfo pathNormalizer(fullPath);
+                            fullPath = pathNormalizer.absoluteFilePath(); // Converts short paths (ADMINI~1) to long paths (Administrator)
                             
                             // Check if this path is a directory (same issue as images)
                             QFileInfo pathInfo(fullPath);
@@ -816,9 +823,8 @@ void DicomReader::refreshFileExistenceStatus()
                     if (image.fileExists && !wasExisting) {
                         int actualFrameCount = getFrameCountFromFile(image.filePath);
                         if (actualFrameCount > 0) {
-                            qDebug() << "[FRAME COUNT UPDATE]" << QFileInfo(image.filePath).fileName() 
-                                     << "- DICOMDIR frames:" << image.frameCount 
-                                     << "- Actual frames:" << actualFrameCount;
+                            logMessage(LOG_DEBUG, QString("[FRAME COUNT UPDATE] %1 - DICOMDIR frames: %2 - Actual frames: %3")
+                                     .arg(QFileInfo(image.filePath).fileName()).arg(image.frameCount).arg(actualFrameCount));
                             image.frameCount = actualFrameCount;
                         }
                     }
@@ -833,7 +839,7 @@ void DicomReader::startProactiveCopyMonitoring()
     // Simplified implementation - just refresh file status
     // The main DicomViewer now handles robocopy detection and progress monitoring
     refreshFileExistenceStatus();
-    qDebug() << "DicomReader: Refreshed file existence status for proactive copy monitoring";
+    LOG_DEBUG("DicomReader: Refreshed file existence status for proactive copy monitoring");
 }
 
 double DicomReader::calculateProgress() const
@@ -897,7 +903,7 @@ bool DicomReader::isStructuredReport(const QString& filePath)
             QString sopUID = QString::fromStdString(sopClassUID.c_str());
             
             // Debug: Log the SOP Class UID we found
-            qDebug() << "DICOM file SOP Class UID:" << sopUID;
+            LOG_DEBUG(QString("DICOM file SOP Class UID: %1").arg(sopUID));
             
             // Known SR SOP Class UIDs
             if (sopUID == "1.2.840.10008.5.1.4.1.1.88.67" || // X-Ray Radiation Dose SR
@@ -907,15 +913,15 @@ bool DicomReader::isStructuredReport(const QString& filePath)
                 sopUID == "1.2.840.10008.5.1.4.1.1.88.40" || // Procedure Log SR
                 sopUID == "1.2.840.10008.5.1.4.1.1.88.50" || // Mammography CAD SR
                 sopUID == "1.2.840.10008.5.1.4.1.1.88.59") {  // Key Object Selection
-                qDebug() << "File identified as SR document:" << filePath;
+                LOG_DEBUG(QString("File identified as SR document: %1").arg(filePath));
                 return true;
             } else {
-                qDebug() << "File identified as regular DICOM image:" << filePath;
+                LOG_DEBUG(QString("File identified as regular DICOM image: %1").arg(filePath));
                 return false;
             }
         }
     } catch (...) {
-        qDebug() << "Exception while checking DICOM file:" << filePath;
+        LOG_ERROR(QString("Exception while checking DICOM file: %1").arg(filePath));
         return false;
     }
 #endif
@@ -940,7 +946,7 @@ void DicomReader::updateImageDisplayNameFromFile(DicomImageInfo& image)
 DicomImageInfo DicomReader::getImageInfoForFile(const QString& filePath) const
 {
     QString targetFileName = QFileInfo(filePath).fileName();
-    qDebug() << "[ICON DEBUG] Looking for image info for file:" << targetFileName << "from path:" << filePath;
+    LOG_DEBUG(QString("[ICON DEBUG] Looking for image info for file: %1 from path: %2").arg(targetFileName).arg(filePath));
     
     // Search through all patients, studies, series to find the file
     int itemCount = 0;
@@ -954,18 +960,18 @@ DicomImageInfo DicomReader::getImageInfoForFile(const QString& filePath) const
                     
                     // Debug first few items
                     if (itemCount <= 3) {
-                        qDebug() << "[ICON DEBUG]" << itemCount << "Checking:" << imageFileName << "frames:" << image.frameCount;
+                        logMessage("DEBUG", QString("[ICON DEBUG] %1 Checking: %2 frames: %3").arg(itemCount).arg(imageFileName).arg(image.frameCount));
                     }
                     
                     // Match by filename (case insensitive)
                     if (imageFileName.compare(targetFileName, Qt::CaseInsensitive) == 0) {
-                        qDebug() << "[ICON DEBUG] ✓ MATCH FOUND:" << imageFileName << "frames:" << image.frameCount;
+                        logMessage("DEBUG", QString("[ICON DEBUG] ✓ MATCH FOUND: %1 frames: %2").arg(imageFileName).arg(image.frameCount));
                         return image;
                     }
                     
                     // Also try exact path match
                     if (image.filePath == filePath) {
-                        qDebug() << "[ICON DEBUG] ✓ EXACT PATH MATCH:" << imageFileName << "frames:" << image.frameCount;
+                        logMessage("DEBUG", QString("[ICON DEBUG] ✓ EXACT PATH MATCH: %1 frames: %2").arg(imageFileName).arg(image.frameCount));
                         return image;
                     }
                 }
@@ -973,7 +979,7 @@ DicomImageInfo DicomReader::getImageInfoForFile(const QString& filePath) const
         }
     }
     
-    qDebug() << "[ICON DEBUG] ✗ NO MATCH FOUND for:" << targetFileName << "- returning default (1 frame)";
+    logMessage("DEBUG", QString("[ICON DEBUG] ✗ NO MATCH FOUND for: %1 - returning default (1 frame)").arg(targetFileName));
     
     // Return default if not found
     DicomImageInfo defaultInfo;
@@ -985,7 +991,7 @@ DicomImageInfo DicomReader::getImageInfoForFile(const QString& filePath) const
 
 void DicomReader::updateFrameCountForFile(const QString& fileName)
 {
-    qDebug() << "[FRAME COUNT UPDATE] Updating frame count for file:" << fileName;
+    logMessage("DEBUG", QString("[FRAME COUNT UPDATE] Updating frame count for file: %1").arg(fileName));
     
     // Find the file in our data structures and update its frame count
     for (auto& patient : m_patients) {
@@ -996,21 +1002,21 @@ void DicomReader::updateFrameCountForFile(const QString& fileName)
                     QString imageFileName = QFileInfo(image.filePath).fileName();
                     
                     if (imageFileName == fileName && image.fileExists) {
-                        qDebug() << "[FRAME COUNT UPDATE] Found matching image, reading actual frame count...";
+                        logMessage("DEBUG", "[FRAME COUNT UPDATE] Found matching image, reading actual frame count...");
                         
                         // Re-read the actual frame count from the now-available file
                         int actualFrameCount = getFrameCountFromFile(image.filePath);
                         
                         if (actualFrameCount != image.frameCount) {
-                            qDebug() << QString("[FRAME COUNT UPDATE] Updated %1 from %2 to %3 frames")
+                            logMessage("DEBUG", QString("[FRAME COUNT UPDATE] Updated %1 from %2 to %3 frames")
                                         .arg(fileName)
                                         .arg(image.frameCount)
-                                        .arg(actualFrameCount);
+                                        .arg(actualFrameCount));
                             
                             image.frameCount = actualFrameCount;
                         } else {
-                            qDebug() << QString("[FRAME COUNT UPDATE] Frame count unchanged: %1 frames")
-                                        .arg(actualFrameCount);
+                            logMessage("DEBUG", QString("[FRAME COUNT UPDATE] Frame count unchanged: %1 frames")
+                                        .arg(actualFrameCount));
                         }
                         
                         return; // Found and updated, we're done
@@ -1020,7 +1026,7 @@ void DicomReader::updateFrameCountForFile(const QString& fileName)
         }
     }
     
-    qDebug() << "[FRAME COUNT UPDATE] File not found in data structures:" << fileName;
+    logMessage("WARN", QString("[FRAME COUNT UPDATE] File not found in data structures: %1").arg(fileName));
 }
 
 #endif // HAVE_DCMTK

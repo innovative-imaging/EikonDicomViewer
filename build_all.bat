@@ -1,9 +1,45 @@
 @echo off
 setlocal
 
+REM Parse command line arguments
+set "BUILD_CONFIG=MinSizeRel"
+set "CONFIG_DIR=MinSizeRel"
+set "LOG_LEVEL_OVERRIDE="
+
+REM Parse first argument (build configuration)
+if "%1"=="release" (
+    set "BUILD_CONFIG=Release"
+    set "CONFIG_DIR=Release"
+    echo Build Configuration: Release
+) else if "%1"=="Release" (
+    set "BUILD_CONFIG=Release"
+    set "CONFIG_DIR=Release"
+    echo Build Configuration: Release
+) else (
+    echo Build Configuration: MinSizeRel ^(default^)
+)
+
+REM Parse second argument (log level override)
+if "%2"=="debug" (
+    set "LOG_LEVEL_OVERRIDE=-DFORCE_DEBUG_LOGS=ON"
+    echo Log Level: DEBUG ^(forced^)
+) else if "%2"=="DEBUG" (
+    set "LOG_LEVEL_OVERRIDE=-DFORCE_DEBUG_LOGS=ON"
+    echo Log Level: DEBUG ^(forced^)
+) else if "%2"=="info" (
+    set "LOG_LEVEL_OVERRIDE=-DFORCE_DEBUG_LOGS=OFF"
+    echo Log Level: INFO ^(forced^)
+) else if "%2"=="INFO" (
+    set "LOG_LEVEL_OVERRIDE=-DFORCE_DEBUG_LOGS=OFF"
+    echo Log Level: INFO ^(forced^)
+) else (
+    echo Log Level: Auto ^(based on build configuration^)
+)
+
 echo ============================================
 echo  Building All EikonDicomViewer Projects
 echo ============================================
+echo Build Configuration: %BUILD_CONFIG%
 echo.
 
 REM Get the script directory (project root)
@@ -30,9 +66,9 @@ mkdir "%BINARIES_DIR%"
 echo Binaries directory ready.
 echo.
 
-REM Build DicomViewer_CPP with MinSizeRel configuration
+REM Build DicomViewer_CPP with selected configuration
 echo ============================================
-echo Building DicomViewer_CPP (MinSizeRel)
+echo Building DicomViewer_CPP ^(%BUILD_CONFIG%^)
 echo ============================================
 cd /d "%DICOM_VIEWER_DIR%"
 
@@ -52,34 +88,34 @@ if not exist "build" mkdir build
 pushd build
 
 REM Configure with CMake
-cmake .. -DCMAKE_PREFIX_PATH="%CMAKE_PREFIX_PATH%"
+cmake .. -DCMAKE_PREFIX_PATH="%CMAKE_PREFIX_PATH%" %LOG_LEVEL_OVERRIDE%
 if %ERRORLEVEL% neq 0 (
     echo CMake configuration failed!
     popd
     exit /b %ERRORLEVEL%
 )
 
-REM Clean the MinSizeRel output directory
-if exist "MinSizeRel\MinSizeRel" (
-    rmdir /S /Q "MinSizeRel\MinSizeRel"
+REM Clean the output directory for the selected configuration
+if exist "%CONFIG_DIR%\%CONFIG_DIR%" (
+    rmdir /S /Q "%CONFIG_DIR%\%CONFIG_DIR%"
 )
 
-REM Build the project with MinSizeRel configuration
-echo Building project with MinSizeRel configuration...
-cmake --build . --config MinSizeRel --clean-first
+REM Build the project with selected configuration
+echo Building project with %BUILD_CONFIG% configuration...
+cmake --build . --config %BUILD_CONFIG% --clean-first
 if %ERRORLEVEL% neq 0 (
     echo Build failed!
     popd
     exit /b %ERRORLEVEL%
 )
 
-REM Copy Utils folder content to MinSizeRel folder
-echo Copying Utils folder content to MinSizeRel directory...
-xcopy /Y "..\Utils\*" "MinSizeRel\MinSizeRel\"
+REM Copy Utils folder content to build output folder
+echo Copying Utils folder content to %CONFIG_DIR% directory...
+xcopy /Y "..\Utils\*" "%CONFIG_DIR%\%CONFIG_DIR%\"
 
 REM Create compressed archive using 7za.exe
 echo Creating compressed archive...
-pushd MinSizeRel\MinSizeRel
+pushd %CONFIG_DIR%\%CONFIG_DIR%
 if exist "EikonDicomViewer.7z" del "EikonDicomViewer.7z"
 if exist "..\..\..\Utils\7za.exe" (
     "..\..\..\Utils\7za.exe" a -t7z -mx=9 -mfb=64 -md=32m -ms=on EikonDicomViewer.7z * -x!*.7z -x!ffmpeg.exe > nul
@@ -129,7 +165,7 @@ echo ============================================
 pushd "%PROJECT_ROOT%"
 
 REM Use the optimization script approach for better deployment
-set "SOURCE_BUILD=%DICOM_VIEWER_DIR%\build\MinSizeRel\MinSizeRel"
+set "SOURCE_BUILD=%DICOM_VIEWER_DIR%\build\%CONFIG_DIR%\%CONFIG_DIR%"
 
 REM Copy main executable
 echo Copying main executable...
@@ -247,3 +283,12 @@ popd
 echo.
 echo Build script completed successfully.
 echo Ready for distribution from the Binaries folder.
+echo.
+echo Usage:
+echo   build_all.bat                    - Build with MinSizeRel configuration (default)
+echo   build_all.bat release            - Build with Release configuration (for production)
+echo   build_all.bat Release            - Build with Release configuration (for production)
+echo   build_all.bat release debug      - Build Release with DEBUG logs (troubleshooting)
+echo   build_all.bat release info       - Build Release with INFO logs (production)
+echo   build_all.bat [config] debug     - Force DEBUG logging for any configuration
+echo   build_all.bat [config] info      - Force INFO logging for any configuration

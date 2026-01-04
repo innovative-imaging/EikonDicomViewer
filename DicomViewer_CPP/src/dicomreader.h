@@ -1,6 +1,7 @@
 ﻿#ifndef DICOMREADER_H
 #define DICOMREADER_H
 
+#include "dicomviewer.h"  // Include for LogLevel enum
 #include <QString>
 #include <QStringList>
 #include <QMap>

@@ -76,6 +76,8 @@ set(SOURCES
     src/saveimagedialog.h
     src/saverundialog.cpp
     src/saverundialog.h
+    src/thumbnailTask.cpp
+    src/thumbnailTask.h
     # Professional Framework Classes (Simplified)
     src/DicomPlaybackController_Simple.cpp
     src/DicomPlaybackController_Simple.h
@@ -109,6 +111,12 @@ if(HAVE_GDCM)
     if(GDCM_INCLUDE_DIRS)
         target_include_directories(EikonDicomViewer PRIVATE ${GDCM_INCLUDE_DIRS})
     endif()
+endif()
+
+# Handle forced debug logging
+if(FORCE_DEBUG_LOGS)
+    target_compile_definitions(EikonDicomViewer PRIVATE FORCE_DEBUG_LOGS)
+    message(STATUS "Forced debug logging enabled")
 endif()
 
 # Ensure proper debug/release definitions

@@ -1,5 +1,57 @@
 ﻿#pragma once
 
+// Undefine Windows macros that conflict with our enum
+#ifdef _WIN32
+    #ifdef ERROR
+        #undef ERROR
+    #endif
+    #ifdef DEBUG  
+        #undef DEBUG
+    #endif
+    #ifdef INFO
+        #undef INFO
+    #endif
+    #ifdef WARN
+        #undef WARN
+    #endif
+#endif
+
+// Log Level Enumeration for filtering
+enum LogLevel {
+    LOG_DEBUG = 0,
+    LOG_INFO = 1,
+    LOG_WARN = 2,
+    LOG_ERROR = 3
+};
+
+// Default log level - can be overridden by CMake
+#ifdef FORCE_DEBUG_LOGS
+    #define DEFAULT_LOG_LEVEL LOG_DEBUG
+#else
+    #ifdef NDEBUG
+        #define DEFAULT_LOG_LEVEL LOG_INFO
+    #else
+        #define DEFAULT_LOG_LEVEL LOG_DEBUG
+    #endif
+#endif
+
+// Forward declarations
+class DicomReader;
+class DvdCopyWorker;
+class ThumbnailTask;
+class ThumbnailTask;
+class DicomFrameProcessor;
+class DicomPlaybackController;
+class DicomInputHandler;
+class ProgressiveFrameLoader;
+class QTimer;
+class QThread;
+class QGraphicsScene;
+class QGraphicsView;
+class QGraphicsPixmapItem;
+class QTextEdit;
+class QListWidget;
+
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QWidget>
 #include <QtWidgets/QVBoxLayout>
@@ -37,6 +89,10 @@
 #include <QtCore/QAtomicInt>
 #include <QtCore/QQueue>
 #include <QtCore/QTextStream>
+#include <QtCore/QThreadPool>
+#include <QtCore/QRunnable>
+#include <QtCore/QRegularExpression>
+#include <QtCore/QDir>
 #include <QtMultimedia/QMediaRecorder>
 #include <QtMultimedia/QMediaCaptureSession>
 #include <QtCore/QUrl>
@@ -75,6 +131,76 @@
 
 // Forward declarations
 class DvdCopyWorker;
+
+// ========== PATH NORMALIZATION UTILITIES ==========
+
+class PathNormalizer {
+public:
+    // Get canonical destination path (simple, no recursion)
+    static QString getCanonicalDestPath() {
+        static QString canonicalPath = QFileInfo(QDir::tempPath() + "/Ekn_TempData/DicomFiles").absoluteFilePath();
+        return canonicalPath;
+    }
+    
+    // Normalize any path to absolute long format and fix case inconsistency
+    static QString normalize(const QString& path) {
+        QString normalized = QFileInfo(path).absoluteFilePath();
+        
+        // Fix case inconsistency between DICOMFiles (from DICOMDIR) and DicomFiles (canonical destination)
+        static QString canonicalDest = getCanonicalDestPath();
+        QString canonicalDir = QFileInfo(canonicalDest).absolutePath();
+        
+        // Replace any case variant of DicomFiles folder with canonical case
+        if (normalized.contains("/DICOMFiles/", Qt::CaseInsensitive) || 
+            normalized.contains("\\DICOMFiles\\", Qt::CaseInsensitive) ||
+            normalized.contains("/DICOMFiles", Qt::CaseInsensitive) ||
+            normalized.contains("\\DICOMFiles", Qt::CaseInsensitive)) {
+            
+            // Extract filename if this is a file path within DICOMFiles
+            QString fileName;
+            QRegularExpression re("[\\/\\\\]DICOM[Ff]iles[\\/\\\\](.+)$");
+            QRegularExpressionMatch match = re.match(normalized);
+            if (match.hasMatch()) {
+                fileName = match.captured(1);
+                return constructFilePath(canonicalDir + "/DicomFiles", fileName);
+            } else {
+                // This is just the directory path itself
+                return canonicalDir + "/DicomFiles";
+            }
+        }
+        
+        return normalized;
+    }
+    
+    // Construct file path using proper Qt path construction
+    static QString constructFilePath(const QString& basePath, const QString& fileName) {
+        return QDir(basePath).absoluteFilePath(fileName);
+    }
+    
+    // Construct relative path safely
+    static QString constructRelativePath(const QString& basePath, const QString& relativePath) {
+        return QDir(basePath).absoluteFilePath(relativePath);
+    }
+};
+
+// ========== FILE STATE MANAGEMENT ==========
+
+// File state tracking for DVD copy and availability
+enum class FileState {
+    NotReady,    // File not yet copied or doesn't exist
+    Copying,     // File being copied from DVD
+    Available,   // File copied and exists, ready for loading
+    DisplayReady // File loaded and currently displayed (optimization state)
+};
+
+// Thumbnail generation state tracking
+enum class ThumbnailState {
+    NotGenerated, // No thumbnail exists yet
+    Queued,       // Queued for generation
+    Generating,   // Currently being generated
+    Ready,        // Thumbnail generated and available
+    Error         // Failed to generate thumbnail
+};
 
 // DVD Copy Worker - Background thread worker for DVD detection and copying
 class ImageProcessingPipeline
@@ -123,6 +249,9 @@ private:
 class DicomViewer : public QMainWindow
 {
     Q_OBJECT
+    
+    // Friend class for parallel thumbnail generation
+    friend class ThumbnailTask;
 
 public:
     DicomViewer(QWidget *parent = nullptr, const QString& sourceDrive = QString());
@@ -230,6 +359,13 @@ private slots:
     
     // Race condition prevention slots
     void onFileReadyForThumbnail(const QString& fileName);
+    void onThumbnailTaskCompleted(const QString& filePath, const QPixmap& thumbnail, const QString& instanceNumber);
+
+    // Logging methods (public for global access)
+    void initializeLogging();
+    void logMessage(const QString& level, const QString& message) const;  // Legacy string-based
+    void logMessage(LogLevel level, const QString& message) const;        // New enum-based
+    void logMessage(const QString& message, LogLevel level) const;        // Message-first enum-based
 
 private:
     // Framework setup methods
@@ -301,12 +437,45 @@ private:
     double calculateFitToWindowZoom();
     QString findFfmpegExecutable();  // Find ffmpeg.exe in local directory or DVD drive
     
+    // State management methods
+    FileState getFileState(const QString& filePath) const;
+    void setFileState(const QString& filePath, FileState state);
+    bool isFileAvailable(const QString& filePath) const;
+    bool isFileDisplayReady(const QString& filePath) const;
+    
+    ThumbnailState getThumbnailState(const QString& filePath) const;
+    void setThumbnailState(const QString& filePath, ThumbnailState state);
+    bool areAllThumbnailsReady() const;
+    
+    // File completion tracking for delayed thumbnails
+    bool areAllFilesComplete() const;
+    int getTotalFileCount() const;
+    
+    // Selection guard methods
+    bool beginSelection(const QString& filePath);
+    void endSelection();
+    bool isSelectionInProgress() const;
+    
+    // State-based navigation methods
+    void autoSelectFirstAvailableImage();
+    void synchronizeThumbnailSelection(const QString& filePath);
+    void initializeFileStatesFromTree(); // Initialize file states for existing files
+    
+    // Display Monitor System
+    void initializeDisplayMonitor();
+    void startDisplayMonitor();
+    void stopDisplayMonitor();
+    void requestDisplay(const QString& filePath);
+    void checkAndUpdateDisplay(); // Called by monitor timer
+    bool isDisplayingAnything() const;
+    void startFirstImageMonitor();
+    void stopFirstImageMonitor();
+    void checkForFirstAvailableImage();
+    void clearCurrentDisplay();
+    
     // FFmpeg copy methods
     void checkInitialFfmpegAvailability();
     
-    // Logging methods
-    void initializeLogging();
-    void logMessage(const QString& level, const QString& message);
     bool copyFfmpegExe();  // Copy ffmpeg executable after DICOM files are copied
     
     // Tree navigation methods
@@ -343,19 +512,44 @@ private:
     QPushButton* m_thumbnailToggleButton;    // Toggle button for collapse/expand
     bool m_thumbnailPanelCollapsed;          // Track collapse state
     QString m_pendingTreeSelection;  // Track tree selection made before thumbnails loaded
-    QThread* m_thumbnailThread;
     QStringList m_pendingThumbnailPaths;
     QMutex m_thumbnailMutex;
-    int m_completedThumbnails;
-    int m_totalThumbnails;
+    QAtomicInt m_completedThumbnails;
+    QAtomicInt m_totalThumbnails;
+    QAtomicInt m_activeThumbnailTasks;
     
     // Race condition prevention members
     QMutex m_dcmtkAccessMutex;           // Protect all DCMTK operations
     QAtomicInt m_thumbnailGenerationActive;  // 0=idle, 1=active
     QMap<QString, bool> m_fileReadyStates;   // Track copy completion
-    QMutex m_fileStatesMutex;                // Protect file states map
+    mutable QMutex m_fileStatesMutex;                // Protect file states map
     QQueue<QString> m_pendingSelections;     // Queue user clicks during generation
     QMutex m_pendingSelectionsMutex;         // Protect pending queue
+    
+    // State-based architecture members
+    QMap<QString, FileState> m_fileStates;           // Track file copy/availability states
+    QMap<QString, ThumbnailState> m_thumbnailStates; // Track thumbnail generation states
+    mutable QMutex m_thumbnailStatesMutex;                   // Protect thumbnail states access
+    
+    // Selection guards to prevent recursion
+    bool m_selectionInProgress;                      // Guard against recursive onTreeItemSelected
+    mutable QMutex m_selectionMutex;                        // Protect selection state
+    QString m_currentDisplayReadyFile;               // Track which file is currently DisplayReady
+    
+    // Application state coordination
+    bool m_thumbnailPanelProcessingActive;          // Guard against thumbnail panel updates
+    QString m_lastSelectedFilePath;                 // Track last user selection for deduplication
+    
+    // Display Monitor System
+    QTimer* m_displayMonitor;                       // Periodic display monitor
+    QString m_requestedDisplayPath;                 // What user wants to display
+    QString m_currentlyDisplayedPath;               // What is actually displayed
+    QMutex m_displayRequestMutex;                   // Protect display request state
+    bool m_displayMonitorActive;                    // Monitor enabled/disabled
+    
+    // FirstImageMonitor for efficient first image auto-display
+    QTimer* m_firstImageMonitor;                    // Timer for checking first available image
+    bool m_firstImageFound;                         // Flag to prevent multiple triggers
     
     // Main content area
     QStackedWidget* m_mainStack;
@@ -538,9 +732,16 @@ private:
     
 private:
     // Logging members
-    QString m_logFilePath;
-    QMutex m_logMutex;
+    mutable QString m_logFilePath;
+    mutable QMutex m_logMutex;
+    mutable LogLevel m_minLogLevel;  // Minimum log level to actually write
     
     // Source drive (from command line parameter)
     QString m_providedSourceDrive;
 };
+
+// Simple logging macros for files without DicomViewer access
+#define LOG_DEBUG(message) qDebug() << "[DEBUG]" << message
+#define LOG_INFO(message) qDebug() << "[INFO ]" << message 
+#define LOG_WARN(message) qDebug() << "[WARN ]" << message
+#define LOG_ERROR(message) qDebug() << "[ERROR]" << message

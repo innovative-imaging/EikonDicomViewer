@@ -3,7 +3,6 @@
 #include "saveimagedialog.h"
 #include "saverundialog.h"
 #include "dvdcopyworker.h"
-#include "thumbnailTask.h"
 
 #include <chrono>
 #include <cstdlib> // For std::exit
@@ -138,7 +137,7 @@ QImage ImageProcessingPipeline::processImage(const QImage& sourceImage) const
     }
 
     
-    // Pipeline: Decompressed Image ? Window/Level ? H-Flip ? V-Flip ? Invert ? Display
+    // Pipeline: Decompressed Image â†’ Window/Level â†’ H-Flip â†’ V-Flip â†’ Invert â†’ Display
     // Note: Decompression already handled by DCMTK/GDCM/libjpeg libraries
     QImage result = sourceImage;
     result = windowLevelStage(result);
@@ -249,6 +248,207 @@ QImage ImageProcessingPipeline::windowLevelStage(const QImage& input) const
 }
 
 
+
+// ========== THUMBNAIL TASK CLASS ==========
+
+class ThumbnailTask : public QObject, public QRunnable
+{
+    Q_OBJECT
+
+public:
+    ThumbnailTask(const QString& filePath, DicomViewer* viewer, QObject* parent = nullptr)
+        : QObject(parent), m_filePath(filePath), m_viewer(viewer)
+    {
+        setAutoDelete(true); // Task will be automatically deleted when finished
+    }
+
+    void run() override {
+        try {
+            // Check if file is accessible before trying to generate thumbnail
+            QFileInfo fileInfo(m_filePath);
+            if (!fileInfo.exists()) {
+                logMessage("WARN", QString("Skipping thumbnail generation for missing file: %1").arg(m_filePath));
+                emit taskCompleted(m_filePath, QPixmap(), "1");
+                return;
+            }
+            
+            // For thumbnail generation, we only need read access - allow read-only files
+            QFile testFile(m_filePath);
+            if (!testFile.open(QIODevice::ReadOnly)) {
+                logMessage("WARN", QString("Skipping thumbnail generation for inaccessible file: %1").arg(m_filePath));
+                emit taskCompleted(m_filePath, QPixmap(), "1");
+                return;
+            }
+            testFile.close();
+            
+            // Check file readiness before processing
+            {
+                QMutexLocker fileLocker(&m_viewer->m_fileStatesMutex);
+                QString filename = fileInfo.fileName();
+                if (m_viewer->m_copyInProgress && !m_viewer->m_fileReadyStates.value(filename, false)) {
+                    logMessage("DEBUG", QString("Skipping file not ready: %1").arg(filename));
+                    emit taskCompleted(m_filePath, QPixmap(), "1");
+                    return;
+                }
+            }
+            
+            // For DVD autorun scenario: Check if file is still being copied
+            QString filename = fileInfo.fileName();
+            bool fileIsCompleted = m_viewer->m_fullyCompletedFiles.contains(filename);
+            
+            if (m_viewer->m_copyInProgress && !fileIsCompleted) {
+                logMessage("DEBUG", QString("Skipping thumbnail generation for file still being copied: %1").arg(filename));
+                emit taskCompleted(m_filePath, QPixmap(), "1");
+                return;
+            }
+            
+            // Generate thumbnail using the viewer's logic
+            QPixmap thumbnail;
+            QString instanceNumber = "1";
+            
+            // Determine item type from tree widget
+            QString itemType = "image"; // Default
+            QTreeWidgetItemIterator it(m_viewer->m_dicomTree);
+            while (*it) {
+                QVariantList userData = (*it)->data(0, Qt::UserRole).toList();
+                if (userData.size() >= 2 && userData[1].toString() == m_filePath) {
+                    itemType = userData[0].toString();
+                    break;
+                }
+                ++it;
+            }
+            
+            if (itemType == "report") {
+                // Generate special thumbnail for reports
+                try {
+                    thumbnail = m_viewer->createReportThumbnail(m_filePath);
+                    instanceNumber = "RPT";
+                } catch (...) {
+                    logMessage("ERROR", QString("Error creating report thumbnail for: %1").arg(m_filePath));
+                    emit taskCompleted(m_filePath, QPixmap(), "1");
+                    return;
+                }
+            } else if (m_viewer->m_dicomReader) {
+                // Protect all DCMTK operations with mutex
+                QMutexLocker dcmtkLocker(&m_viewer->m_dcmtkAccessMutex);
+                
+                // Generate DICOM thumbnail using viewer's existing logic
+                QPixmap originalPixmap;
+                try {
+                    originalPixmap = m_viewer->convertDicomFrameToPixmap(m_filePath, 0);
+                } catch (...) {
+                    logMessage("ERROR", QString("Error converting DICOM frame to pixmap for: %1").arg(m_filePath));
+                    emit taskCompleted(m_filePath, QPixmap(), "1");
+                    return;
+                }
+                
+                if (!originalPixmap.isNull()) {
+                    // Create thumbnail using viewer's existing thumbnail creation logic
+                    thumbnail = createDicomThumbnail(originalPixmap, m_filePath, instanceNumber);
+                }
+            }
+            
+            // Emit completion signal
+            emit taskCompleted(m_filePath, thumbnail, instanceNumber);
+            
+        } catch (const std::exception& e) {
+            logMessage("ERROR", QString("Error generating thumbnail for %1: %2").arg(m_filePath).arg(e.what()));
+            emit taskCompleted(m_filePath, QPixmap(), "1");
+        }
+    }
+
+signals:
+    void taskCompleted(const QString& filePath, const QPixmap& thumbnail, const QString& instanceNumber);
+
+private:
+    QPixmap createDicomThumbnail(const QPixmap& originalPixmap, const QString& filePath, QString& instanceNumber) {
+        // Scale image to fit the new smaller thumbnail size
+        QPixmap scaledPixmap = originalPixmap.scaled(180, 120, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        
+        QPixmap finalThumbnail(190, 150);
+        finalThumbnail.fill(QColor(42, 42, 42));
+        
+        QPainter painter(&finalThumbnail);
+        painter.setRenderHint(QPainter::Antialiasing);
+        
+        // Center and draw the scaled image
+        QRect imageRect((finalThumbnail.width() - scaledPixmap.width()) / 2, 15,
+                       scaledPixmap.width(), scaledPixmap.height());
+        painter.drawPixmap(imageRect, scaledPixmap);
+        
+        // Extract instance number and frame count from DICOM metadata
+        int frameCount = 1;
+        
+        try {
+            DicomFrameProcessor tempProcessor;
+            if (tempProcessor.loadDicomFile(filePath)) {
+                frameCount = static_cast<int>(tempProcessor.getNumberOfFrames());
+                
+                // Get actual Instance Number from DICOM tag (0020,0013)
+                QString dicomInstanceNumber = tempProcessor.getDicomTagValue("0020,0013");
+                if (!dicomInstanceNumber.isEmpty()) {
+                    instanceNumber = dicomInstanceNumber;
+                }
+            }
+        } catch (...) {
+            logMessage("WARN", QString("Error reading DICOM metadata for thumbnail, using defaults: %1").arg(filePath));
+        }
+        
+        // Create top overlay bar with background
+        painter.fillRect(0, 0, finalThumbnail.width(), 20, QColor(0, 0, 0, 180));
+        
+        // Draw frame count at top-left
+        painter.setPen(QColor(255, 255, 255));
+        painter.setFont(QFont("Arial", 11, QFont::Bold));
+        painter.drawText(5, 14, QString("%1").arg(frameCount));
+        
+        // Draw instance number in center
+        QString centerText = instanceNumber;
+        QFontMetrics fm(painter.font());
+        int textWidth = fm.horizontalAdvance(centerText);
+        painter.drawText((finalThumbnail.width() - textWidth) / 2, 14, centerText);
+        
+        // Load and draw appropriate PNG icon at top-right
+        QString iconPath = (frameCount > 1) 
+            ? "DicomViewer_CPP/resources/icons/AcquisitionHeader.png"  // Multi-frame
+            : "DicomViewer_CPP/resources/icons/Camera.png";           // Single frame
+        
+        QPixmap iconPixmap(iconPath);
+        if (iconPixmap.isNull()) {
+            // Try absolute path if relative doesn't work
+            QString absoluteIconPath = (frameCount > 1) 
+                ? "d:/Repos/EikonDicomViewer/DicomViewer_CPP/resources/icons/AcquisitionHeader.png"
+                : "d:/Repos/EikonDicomViewer/DicomViewer_CPP/resources/icons/Camera.png";
+            iconPixmap.load(absoluteIconPath);
+        }
+        
+        if (!iconPixmap.isNull()) {
+            // Scale icon to proper size (16x16 for top overlay)
+            QPixmap scaledIcon = iconPixmap.scaled(16, 16, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            painter.drawPixmap(finalThumbnail.width() - 20, 2, scaledIcon);
+            logMessage("DEBUG", QString("Icon loaded successfully: %1").arg(iconPath));
+        } else {
+            // Fallback: draw a simple text icon
+            painter.setPen(QColor(100, 149, 237));
+            painter.setFont(QFont("Arial", 10, QFont::Bold));
+            QString fallbackIcon = (frameCount > 1) ? "M" : "S";
+            painter.drawText(finalThumbnail.width() - 18, 14, fallbackIcon);
+            logMessage("WARN", QString("Icon failed to load, using fallback: %1").arg(iconPath));
+        }
+        
+        painter.end();
+        return finalThumbnail;
+    }
+
+    void logMessage(const QString& level, const QString& message) {
+        if (m_viewer) {
+            m_viewer->logMessage(level, message);
+        }
+    }
+
+    QString m_filePath;
+    DicomViewer* m_viewer;
+};
 
 // ========== DICOM VIEWER IMPLEMENTATION ==========
 
@@ -1066,7 +1266,7 @@ void DicomViewer::createThumbnailPanel()
     headerLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     
     // Toggle button (collapse/expand)
-    m_thumbnailToggleButton = new QPushButton("?");
+    m_thumbnailToggleButton = new QPushButton("▼");
     m_thumbnailToggleButton->setFixedSize(32, 32);  // Larger size for better visibility
     m_thumbnailToggleButton->setStyleSheet(R"(
         QPushButton {
@@ -1813,7 +2013,7 @@ void DicomViewer::updateThumbnailPanel()
     }
     
     // Prevent updating thumbnails if already in progress
-    if (m_thumbnailGenerationActive) {
+    if (m_thumbnailThread && m_thumbnailThread->isRunning()) {
         logMessage("DEBUG", "Thumbnail generation already in progress - skipping update");
         return;
     }
@@ -1939,12 +2139,12 @@ void DicomViewer::generateThumbnailsInBackground()
     }
     
     // Initialize progress tracking and update status bar
-    m_completedThumbnails = 0;
-    m_totalThumbnails = m_pendingThumbnailPaths.size();
-    m_activeThumbnailTasks = m_pendingThumbnailPaths.size();
-    updateStatusBar(QString("Generating thumbnails... (0/%1)").arg(int(m_totalThumbnails)), 0);
+    m_completedThumbnails.store(0);
+    m_totalThumbnails.store(m_pendingThumbnailPaths.size());
+    m_activeThumbnailTasks.store(m_pendingThumbnailPaths.size());
+    updateStatusBar(QString("Generating thumbnails... (0/%1)").arg(m_totalThumbnails.load()), 0);
     
-    logMessage("DEBUG", QString("Starting parallel thumbnail generation for %1 files using QThreadPool").arg(int(m_totalThumbnails)));
+    logMessage("DEBUG", QString("Starting parallel thumbnail generation for %1 files using QThreadPool").arg(m_totalThumbnails.load()));
     
     // Submit each thumbnail as a separate task to the thread pool
     for (const QString& filePath : m_pendingThumbnailPaths) {
@@ -1970,7 +2170,7 @@ void DicomViewer::onThumbnailTaskCompleted(const QString& filePath, const QPixma
     onThumbnailGeneratedWithMetadata(filePath, thumbnail, instanceNumber);
     
     // Thread-safe decrement of active tasks counter
-    int remainingTasks = --m_activeThumbnailTasks;
+    int remainingTasks = m_activeThumbnailTasks.fetchAndSubtract(1) - 1;
     
     logMessage("DEBUG", QString("Thumbnail task completed for: %1, remaining tasks: %2")
                .arg(QFileInfo(filePath).baseName()).arg(remainingTasks));
@@ -1979,15 +2179,13 @@ void DicomViewer::onThumbnailTaskCompleted(const QString& filePath, const QPixma
     if (remainingTasks == 0) {
         logMessage("DEBUG", "All thumbnail tasks completed - triggering completion handler");
         
-        // Reset active flag  
-        m_thumbnailGenerationActive = 0;
+        // Reset active flag
+        m_thumbnailGenerationActive.storeRelease(0);
         
         // Trigger completion
         onAllThumbnailsGenerated();
     }
 }
-
-void DicomViewer::checkAndShowThumbnailPanel()
 {
     // Only show the thumbnail panel if all conditions are met:
     // 1. All thumbnails are generated
@@ -2218,12 +2416,12 @@ void DicomViewer::toggleThumbnailPanel()
     if (m_thumbnailPanelCollapsed) {
         // True collapse: hide thumbnail list and shrink panel width
         m_thumbnailList->hide();
-        m_thumbnailToggleButton->setText("?");
+        m_thumbnailToggleButton->setText("►");
         m_thumbnailPanel->setFixedWidth(55);  // Optimized width to ensure button is fully visible with padding
     } else {
         // Expand: show thumbnail list and restore full width
         m_thumbnailList->show();
-        m_thumbnailToggleButton->setText("?");
+        m_thumbnailToggleButton->setText("▼");
         m_thumbnailPanel->setFixedWidth(220);  // Full width
     }
     
@@ -2577,20 +2775,20 @@ void DicomViewer::updateOverlayInfo()
     // LAO/RAO (Primary Angle)
     if (m_hasPositionerAngles) {
         if (m_currentPositionerPrimaryAngle > 0) {
-            bottomLeftText += QString("LAO: %1?\n").arg(m_currentPositionerPrimaryAngle, 0, 'f', 1);
+            bottomLeftText += QString("LAO: %1°\n").arg(m_currentPositionerPrimaryAngle, 0, 'f', 1);
         } else if (m_currentPositionerPrimaryAngle < 0) {
-            bottomLeftText += QString("RAO: %1?\n").arg(qAbs(m_currentPositionerPrimaryAngle), 0, 'f', 1);
+            bottomLeftText += QString("RAO: %1°\n").arg(qAbs(m_currentPositionerPrimaryAngle), 0, 'f', 1);
         } else {
-            bottomLeftText += "LAO: 0?\n";
+            bottomLeftText += "LAO: 0°\n";
         }
         
         // CRAN/CAUD (Secondary Angle)
         if (m_currentPositionerSecondaryAngle > 0) {
-            bottomLeftText += QString("CAUD: %1?\n").arg(m_currentPositionerSecondaryAngle, 0, 'f', 1);
+            bottomLeftText += QString("CAUD: %1°\n").arg(m_currentPositionerSecondaryAngle, 0, 'f', 1);
         } else if (m_currentPositionerSecondaryAngle < 0) {
-            bottomLeftText += QString("CRAN: %1?\n").arg(qAbs(m_currentPositionerSecondaryAngle), 0, 'f', 1);
+            bottomLeftText += QString("CRAN: %1°\n").arg(qAbs(m_currentPositionerSecondaryAngle), 0, 'f', 1);
         } else {
-            bottomLeftText += "CRAN: 0?\n";
+            bottomLeftText += "CRAN: 0°\n";
         }
     } else {
         bottomLeftText += "LAO/RAO: --\n";
@@ -5628,7 +5826,7 @@ QString DicomViewer::formatMeasurement(const QString& name, const QString& value
     if (!unit.isEmpty() && unit != value) {
         QString cleanUnit = unit;
         // Fix degree symbol encoding issues
-        if (cleanUnit.contains("?") || cleanUnit.contains("?") || cleanUnit.toLower().contains("degree")) {
+        if (cleanUnit.contains("°") || cleanUnit.contains("�") || cleanUnit.toLower().contains("degree")) {
             cleanUnit = "degrees";
         }
         result += " " + cleanUnit;
@@ -6203,7 +6401,7 @@ QString DicomViewer::findDvdWithDicomFiles()
             logMessage("DEBUG", QString("[DVD CONTENT] Found %1 files in DicomFiles folder").arg(files.count()));
             
             if (!files.isEmpty()) {
-                logMessage("DEBUG", QString("[DVD SUCCESS] ? Found %1 DICOM files at: %2").arg(files.size()).arg(dicomPath));
+                logMessage("DEBUG", QString("[DVD SUCCESS] ✓ Found %1 DICOM files at: %2").arg(files.size()).arg(dicomPath));
                 
                 // Log first few filenames for verification
                 for (int i = 0; i < qMin(3, files.size()); i++) {
@@ -6222,7 +6420,7 @@ QString DicomViewer::findDvdWithDicomFiles()
         }
     }
     
-    logMessage("DEBUG", "[DVD SCAN] ? No DVD with DICOM files found in any drive");
+    logMessage("DEBUG", "[DVD SCAN] ✗ No DVD with DICOM files found in any drive");
     return QString(); // No DVD with DICOM files found
 }
 
@@ -6449,8 +6647,13 @@ void DicomViewer::onCopyCompleted(bool success)
         logMessage("DEBUG", "Cleared completed files set - all files now fully available after DVD copy");
         
         // Force stop any ongoing thumbnail generation before regenerating
-        QThreadPool::globalInstance()->clear(); // Clear pending tasks
-        logMessage("DEBUG", "Stopped ongoing thumbnail generation for DVD copy completion");
+        if (m_thumbnailThread && m_thumbnailThread->isRunning()) {
+            logMessage("DEBUG", "Stopping ongoing thumbnail generation for DVD copy completion");
+            m_thumbnailThread->quit();
+            m_thumbnailThread->wait();
+            m_thumbnailThread->deleteLater();
+            m_thumbnailThread = nullptr;
+        }
         
         // Reset thumbnail completion flag since we're regenerating
         m_allThumbnailsComplete = false;
@@ -6941,7 +7144,7 @@ void DicomViewer::parseRobocopyOutput(const QString& output)
                 
                 if (progress >= 100) {
                     s_filesProcessed++;
-                    logMessage("DEBUG", QString("[DVD COPY] ? Completed file #%1: %2")
+                    logMessage("DEBUG", QString("[DVD COPY] ✓ Completed file #%1: %2")
                                .arg(s_filesProcessed)
                                .arg(filename));
                     
@@ -6975,7 +7178,7 @@ void DicomViewer::parseRobocopyOutput(const QString& output)
                 QString filepath = match.captured(2).trimmed();
                 QString filename = QFileInfo(filepath).fileName();
                 
-                logMessage("DEBUG", QString("[DVD COPY] ? Starting: %1 (%2 KB)")
+                logMessage("DEBUG", QString("[DVD COPY] → Starting: %1 (%2 KB)")
                            .arg(filename)
                            .arg(fileSize / 1024));
             }
@@ -7040,7 +7243,7 @@ void DicomViewer::autoSelectFirstCompletedImage()
                 
                 // Check if this file is completed or if it's available locally
                 if (m_fullyCompletedFiles.contains(fileName) || QFile::exists(filePath)) {
-                    logMessage("DEBUG", QString("[AUTO SELECT] ? Found completed image item: %1 (file: %2)").arg(item->text(0)).arg(fileName));
+                    logMessage("DEBUG", QString("[AUTO SELECT] ✓ Found completed image item: %1 (file: %2)").arg(item->text(0)).arg(fileName));
                     return item;
                 }
             }
@@ -7071,7 +7274,7 @@ void DicomViewer::autoSelectFirstCompletedImage()
         logMessage("DEBUG", QString("[AUTO SELECT] Searching top level item %1: %2").arg(i).arg(m_dicomTree->topLevelItem(i)->text(0)));
         QTreeWidgetItem* firstImage = findFirstImageItem(m_dicomTree->topLevelItem(i));
         if (firstImage) {
-            logMessage("DEBUG", QString("[AUTO SELECT] ? Auto-selecting first completed image: %1").arg(firstImage->text(0)));
+            logMessage("DEBUG", QString("[AUTO SELECT] ✓ Auto-selecting first completed image: %1").arg(firstImage->text(0)));
             
             // Expand parent items to make the selection visible
             QTreeWidgetItem* parent = firstImage->parent();
@@ -7089,14 +7292,14 @@ void DicomViewer::autoSelectFirstCompletedImage()
             // Mark that we've auto-selected the first image
             m_firstImageAutoSelected = true;
             
-            logMessage("DEBUG", "[AUTO SELECT] ? First image auto-selected and displayed!");
+            logMessage("DEBUG", "[AUTO SELECT] ✓ First image auto-selected and displayed!");
             return;
         } else {
             logMessage("DEBUG", QString("[AUTO SELECT] No suitable image found in top level item %1").arg(i));
         }
     }
     
-    logMessage("DEBUG", "[AUTO SELECT] ? No completed images found yet for auto-selection");
+    logMessage("DEBUG", "[AUTO SELECT] ✗ No completed images found yet for auto-selection");
 }
 
 void DicomViewer::onThumbnailGeneratedWithMetadata(const QString& filePath, const QPixmap& thumbnail, const QString& instanceNumber)
@@ -7158,9 +7361,9 @@ void DicomViewer::onThumbnailGeneratedWithMetadata(const QString& filePath, cons
         }
     }
     
-    ++m_completedThumbnails;
-    int completed = m_completedThumbnails;
-    int total = m_totalThumbnails;
+    m_completedThumbnails.fetchAndAddRelease(1);
+    int completed = m_completedThumbnails.load();
+    int total = m_totalThumbnails.load();
     logMessage("DEBUG", QString("Thumbnail progress: %1 of %2").arg(completed).arg(total));
     
     // Update status bar with thumbnail generation progress (batch updates to avoid UI spam)
@@ -7207,7 +7410,14 @@ void DicomViewer::onAllThumbnailsGenerated()
 {
     logMessage("DEBUG", "Thumbnail generation completed! Showing thumbnail panel.");
     
-    // Clean up thread pool tasks (they auto-delete)
+    // Clean up thread
+    if (m_thumbnailThread) {
+        m_thumbnailThread->quit();
+        m_thumbnailThread->wait();
+        m_thumbnailThread->deleteLater();
+        m_thumbnailThread = nullptr;
+    }
+    
     // Mark thumbnails as complete
     m_allThumbnailsComplete = true;
     
@@ -7892,5 +8102,9 @@ void DicomViewer::checkForFirstAvailableImage()
     }
 }
 
-
+ 
+ / /   I n c l u d e   M O C   f i l e   f o r   Q _ O B J E C T   c l a s s e s   d e f i n e d   i n   t h i s   s o u r c e   f i l e 
+ 
+ # i n c l u d e   " d i c o m v i e w e r . m o c " 
+ 
  
