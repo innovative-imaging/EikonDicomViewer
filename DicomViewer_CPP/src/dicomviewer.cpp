@@ -629,6 +629,9 @@ DicomViewer::DicomViewer(QWidget *parent, const QString& sourceDrive)
     // Initialize Display Monitor System
     initializeDisplayMonitor();
     
+    // Initialize file availability monitoring state
+    m_fileAvailabilityMonitoringActive = false;
+    
     // Set global DicomViewer instance for logging functions
     g_dicomViewer = this;
     
@@ -646,7 +649,9 @@ DicomViewer::~DicomViewer()
 {
     // Clear global pointer
     g_dicomViewer = nullptr;
-    // Stop first image monitor thread
+    
+    // Stop monitoring systems
+    stopFileAvailabilityMonitoring();
     stopFirstImageMonitor();
     
     if (m_playbackTimer && m_playbackTimer->isActive()) {
@@ -2948,6 +2953,9 @@ void DicomViewer::loadDicomDir(const QString& dicomdirPath)
         
         // Initialize file states for all DICOM files
         initializeFileStatesFromTree();
+        
+        // Start file availability monitoring for thumbnail generation
+        startFileAvailabilityMonitoring();
         
         // Start monitoring for first available image (will check if already displaying)
         logMessage("DEBUG", "[LOAD DICOMDIR] Starting first image monitor");
@@ -6448,24 +6456,10 @@ void DicomViewer::onCopyCompleted(bool success)
         m_fullyCompletedFiles.clear();
         logMessage("DEBUG", "Cleared completed files set - all files now fully available after DVD copy");
         
-        // Force stop any ongoing thumbnail generation before regenerating
-        QThreadPool::globalInstance()->clear(); // Clear pending tasks
-        logMessage("DEBUG", "Stopped ongoing thumbnail generation for DVD copy completion");
-        
-        // Reset thumbnail completion flag since we're regenerating
+        // Reset thumbnail completion flag for regeneration
         m_allThumbnailsComplete = false;
         
-        // FIRST: Regenerate thumbnails with local paths before tree repopulation
-        logMessage("DEBUG", "DVD copy completed - regenerating thumbnails BEFORE tree repopulation");
-        logMessage("DEBUG", "[THUMBNAIL] About to regenerate thumbnails - this might block main thread");
-        if (m_totalThumbnails > 0) {
-            // Use a timer to defer thumbnail generation and avoid blocking the UI
-            QTimer::singleShot(50, this, [this]() {
-                logMessage("DEBUG", "[THUMBNAIL] Deferred thumbnail regeneration starting");
-                generateThumbnailsInBackground();
-            });
-        }
-        logMessage("DEBUG", "[THUMBNAIL] Thumbnail regeneration deferred to avoid UI blocking");
+        logMessage("INFO", "[DVD COPY] *** COPY COMPLETED - Will update file states after tree repopulation ***");
         
         // Defer tree repopulation and auto-selection to avoid UI freeze
         QTimer::singleShot(100, this, [this]() {
@@ -6496,12 +6490,31 @@ void DicomViewer::onCopyCompleted(bool success)
                 logMessage("DEBUG", "[DVD COPY] Initializing file states after tree repopulation");
                 initializeFileStatesFromTree();
                 
-                // Check if all files are now complete and trigger thumbnail creation if so
-                if (areAllFilesComplete()) {
-                    logMessage("INFO", "[ALL FILES COMPLETE] All files now available after DVD copy - triggering thumbnail creation");
-                    updateStatusBar("Generating thumbnails...", 0);
-                    updateThumbnailPanel();
+                // Mark ALL files as Available since DVD copy completed successfully
+                logMessage("INFO", "[DVD COPY] Marking all files as Available after successful copy...");
+                QMutexLocker locker(&m_fileStatesMutex);
+                QTreeWidgetItemIterator fileIt(m_dicomTree);
+                int markedAsAvailable = 0;
+                while (*fileIt) {
+                    QVariantList userData = (*fileIt)->data(0, Qt::UserRole).toList();
+                    if (userData.size() >= 2 && (userData[0].toString() == "image" || userData[0].toString() == "report")) {
+                        QString filePath = userData[1].toString();
+                        if (QFile::exists(filePath)) {
+                            FileState oldState = m_fileStates.value(filePath, FileState::NotReady);
+                            if (oldState != FileState::Available) {
+                                m_fileStates[filePath] = FileState::Available;
+                                markedAsAvailable++;
+                            }
+                        }
+                    }
+                    ++fileIt;
                 }
+                locker.unlock();
+                
+                logMessage("INFO", QString("[DVD COPY] Marked %1 files as Available - thumbnail generation will auto-trigger").arg(markedAsAvailable));
+                
+                // The file availability monitor will automatically trigger thumbnails when ready
+                // No manual intervention needed - clean separation of concerns
                 
                 // First image monitor already started during copy initiation
                 logMessage("DEBUG", "[DVD COPY] First image monitor already active from copy initiation");
@@ -7207,6 +7220,9 @@ void DicomViewer::onAllThumbnailsGenerated()
 {
     logMessage("DEBUG", "Thumbnail generation completed! Showing thumbnail panel.");
     
+    // Stop file availability monitoring since thumbnails are complete
+    stopFileAvailabilityMonitoring();
+    
     // Clean up thread pool tasks (they auto-delete)
     // Mark thumbnails as complete
     m_allThumbnailsComplete = true;
@@ -7395,6 +7411,14 @@ void DicomViewer::setFileState(const QString& filePath, FileState state)
         } else if (m_currentDisplayReadyFile == filePath) {
             m_currentDisplayReadyFile.clear();
         }
+        
+        // NEW: Check if all files are now Available and trigger thumbnails if so
+        if (state == FileState::Available) {
+            // Use a timer to defer the check to avoid blocking and allow batch updates
+            QTimer::singleShot(10, this, [this]() {
+                checkAllFilesAvailableAndTriggerThumbnails();
+            });
+        }
     }
 }
 
@@ -7448,6 +7472,63 @@ bool DicomViewer::areAllThumbnailsReady() const
     
     logMessage("DEBUG", QString("[THUMBNAIL CHECK] All %1 thumbnails are Ready").arg(m_thumbnailStates.size()));
     return true;
+}
+
+void DicomViewer::checkAllFilesAvailableAndTriggerThumbnails()
+{
+    // Skip if monitoring is not active
+    if (!m_fileAvailabilityMonitoringActive) {
+        logMessage("DEBUG", "[FILE AVAILABILITY MONITOR] Monitoring not active - skipping check");
+        return;
+    }
+    
+    logMessage("DEBUG", "[FILE AVAILABILITY MONITOR] Checking if all files are now Available...");
+    
+    // Skip if thumbnail generation is already active
+    if (m_thumbnailGenerationActive) {
+        logMessage("DEBUG", "[FILE AVAILABILITY MONITOR] Thumbnail generation already active - skipping check");
+        return;
+    }
+    
+    // Skip if thumbnails are already complete
+    if (m_allThumbnailsComplete) {
+        logMessage("DEBUG", "[FILE AVAILABILITY MONITOR] Thumbnails already complete - skipping check");
+        return;
+    }
+    
+    if (areAllFilesComplete()) {
+        logMessage("INFO", "[FILE AVAILABILITY MONITOR] *** ALL FILES NOW AVAILABLE *** - Triggering thumbnail generation");
+        
+        // Update status and trigger thumbnail generation
+        updateStatusBar("All files available - Generating thumbnails...", 0);
+        
+        // Trigger thumbnail generation through the existing panel update mechanism
+        updateThumbnailPanel();
+    } else {
+        // Log current availability status for debugging
+        QMutexLocker locker(&m_fileStatesMutex);
+        int totalFiles = getTotalFileCount();
+        int availableFiles = 0;
+        for (auto it = m_fileStates.begin(); it != m_fileStates.end(); ++it) {
+            if (it.value() == FileState::Available || it.value() == FileState::DisplayReady) {
+                availableFiles++;
+            }
+        }
+        logMessage("DEBUG", QString("[FILE AVAILABILITY MONITOR] Still waiting: %1/%2 files available")
+                 .arg(availableFiles).arg(totalFiles));
+    }
+}
+
+void DicomViewer::startFileAvailabilityMonitoring()
+{
+    logMessage("INFO", "[FILE AVAILABILITY MONITOR] *** STARTING file availability monitoring ***");
+    m_fileAvailabilityMonitoringActive = true;
+}
+
+void DicomViewer::stopFileAvailabilityMonitoring()
+{
+    logMessage("INFO", "[FILE AVAILABILITY MONITOR] *** STOPPING file availability monitoring ***");
+    m_fileAvailabilityMonitoringActive = false;
 }
 
 bool DicomViewer::areAllFilesComplete() const
@@ -7893,4 +7974,3 @@ void DicomViewer::checkForFirstAvailableImage()
 }
 
 
- 

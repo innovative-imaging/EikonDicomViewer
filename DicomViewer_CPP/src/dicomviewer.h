@@ -450,6 +450,9 @@ private:
     // File completion tracking for delayed thumbnails
     bool areAllFilesComplete() const;
     int getTotalFileCount() const;
+    void checkAllFilesAvailableAndTriggerThumbnails(); // NEW: Monitor file availability
+    void startFileAvailabilityMonitoring();  // Start monitoring
+    void stopFileAvailabilityMonitoring();   // Stop monitoring
     
     // Selection guard methods
     bool beginSelection(const QString& filePath);
@@ -549,6 +552,9 @@ private:
     
     // FirstImageMonitor for efficient first image auto-display
     QTimer* m_firstImageMonitor;                    // Timer for checking first available image
+    
+    // File Availability Monitoring
+    bool m_fileAvailabilityMonitoringActive;        // Whether file monitoring is active
     bool m_firstImageFound;                         // Flag to prevent multiple triggers
     
     // Main content area
