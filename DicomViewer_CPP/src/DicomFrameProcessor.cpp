@@ -259,9 +259,10 @@ QImage DicomFrameProcessor::getFrameAsQImage(unsigned long frameNumber)
             return QImage();
         }
         
-        // Apply window/level settings and convert to 8-bit
-        if (dicomImage->setWindow(m_defaultWindowCenter, m_defaultWindowWidth) == 0) {
-        }
+        // SKIP DCMTK windowing - get raw 8-bit data without windowing
+        // We'll apply windowing at display level using the image pipeline
+        // if (dicomImage->setWindow(m_defaultWindowCenter, m_defaultWindowWidth) == 0) {
+        // }
         
         auto windowTime = std::chrono::high_resolution_clock::now();
         auto windowDuration = std::chrono::duration_cast<std::chrono::milliseconds>(windowTime - statusTime).count();

@@ -214,26 +214,21 @@ QImage ImageProcessingPipeline::windowLevelStage(const QImage& input) const
         for (int x = 0; x < result.width(); ++x) {
             QRgb pixel = scanLine[x];
             
-            // Get the grayscale value from the display image (0-255)
-            int displayGrayValue = qGray(pixel);
+            // Get the grayscale value from the 8-bit image (0-255)
+            // DCMTK has already converted from original bit depth to 8-bit
+            // We should apply windowing directly to this 8-bit data
+            int pixelValue = qGray(pixel);
             
-            // Scale back to original DICOM pixel value range based on BitsStored
-            // For BitsStored=8: scale 0-255 stays as 0-255
-            // For BitsStored=12: scale 0-255 to 0-4095
-            // For BitsStored=16: scale 0-255 to 0-65535
-            double maxPixelValue = (1 << m_bitsStored) - 1;  // 2^BitsStored - 1
-            double originalPixelValue = (displayGrayValue / 255.0) * maxPixelValue;
-            
-            // Apply window/level algorithm using original DICOM pixel value range
+            // Apply window/level algorithm directly to 8-bit data
             double windowedValue;
             if (m_windowWidth > 1) {  // Minimum meaningful width
-                if (originalPixelValue <= minValue) {
+                if (pixelValue <= minValue) {
                     windowedValue = 0.0;
-                } else if (originalPixelValue >= maxValue) {
+                } else if (pixelValue >= maxValue) {
                     windowedValue = 255.0;
                 } else {
                     // Scale within window range to 0-255
-                    windowedValue = ((originalPixelValue - minValue) / m_windowWidth) * 255.0;
+                    windowedValue = ((pixelValue - minValue) / m_windowWidth) * 255.0;
                 }
             } else {
                 // If width too small, use mid-gray
@@ -1598,8 +1593,9 @@ void DicomViewer::showWindowLevelDialog()
     
     // For now, show a simple message box with current values
     // In a full implementation, this would show a proper dialog
-    double currentCenter = m_imagePipeline->getWindowCenter();
-    double currentWidth = m_imagePipeline->getWindowWidth();
+    // Show the original DICOM values that are displayed in UI, not the scaled pipeline values
+    double currentCenter = m_currentWindowCenter;
+    double currentWidth = m_currentWindowWidth;
     
     QString message = QString("Current Window/Level:\nCenter: %1\nWidth: %2\n\n(Custom dialog not yet implemented)")
                      .arg(currentCenter).arg(currentWidth);
@@ -2683,12 +2679,16 @@ void DicomViewer::updateOverlayInfo()
     // Window/Level values - show if window width is positive (center can be negative)
     if (m_currentWindowWidth > 0) {
         bottomRightText += QString("WL: %1 WW: %2").arg(m_currentWindowCenter, 0, 'f', 0).arg(m_currentWindowWidth, 0, 'f', 0);
+        logMessage("DEBUG", QString("UI OVERLAY DISPLAY: WL=%1 WW=%2 (from m_currentWindow variables)")
+            .arg(m_currentWindowCenter, 0, 'f', 0).arg(m_currentWindowWidth, 0, 'f', 0));
     } else {
         // Show current pipeline values as fallback
         double pipelineCenter = m_imagePipeline->getWindowCenter();
         double pipelineWidth = m_imagePipeline->getWindowWidth();
         if (pipelineWidth > 0) {
             bottomRightText += QString("WL: %1 WW: %2").arg(pipelineCenter, 0, 'f', 0).arg(pipelineWidth, 0, 'f', 0);
+            logMessage("DEBUG", QString("UI OVERLAY FALLBACK: WL=%1 WW=%2 (from pipeline - should NOT happen)")
+                .arg(pipelineCenter, 0, 'f', 0).arg(pipelineWidth, 0, 'f', 0));
         }
     }
     
@@ -2798,9 +2798,9 @@ void DicomViewer::processThroughPipeline()
     // Convert back to pixmap and update display
     m_currentPixmap = QPixmap::fromImage(processedImage);
     
-    // Sync current W/L values with the pipeline after processing
-    m_currentWindowCenter = m_imagePipeline->getWindowCenter();
-    m_currentWindowWidth = m_imagePipeline->getWindowWidth();
+    // Do NOT sync W/L values from pipeline back to UI variables!
+    // m_currentWindowCenter and m_currentWindowWidth should always contain
+    // the original DICOM values for UI display, not the scaled pipeline values.
     
     updateImageDisplay();
 }
@@ -2822,11 +2822,11 @@ void DicomViewer::startWindowing(const QPoint& pos)
     m_windowingActive = true;
     m_windowingStartPos = pos;
     
-    // Initialize with current values or defaults
-    m_currentWindowCenter = m_imagePipeline->getWindowCenter();
-    m_currentWindowWidth = m_imagePipeline->getWindowWidth();
-    m_originalWindowCenter = m_currentWindowCenter;
-    m_originalWindowWidth = m_currentWindowWidth;
+    // Do NOT overwrite the original DICOM values!
+    // m_currentWindowCenter and m_currentWindowWidth should already contain 
+    // the original DICOM values from when the image was loaded.
+    // m_originalWindowCenter and m_originalWindowWidth are for reset functionality.
+    // The pipeline contains scaled values which should never be copied back to UI variables.
     
     // Enable window/level processing if not already enabled
     if (!m_imagePipeline->isWindowLevelEnabled()) {
@@ -2867,13 +2867,29 @@ void DicomViewer::updateWindowing(const QPoint& pos)
     newWidth = qBound(1.0, newWidth, 655536.0);  // Width: 1 to 655536
     newCenter = qBound(-32000.0, newCenter, 655536.0);  // Center: -32000 to 655536
     
-    // Update values
+    // Update values (these are kept as original DICOM values for UI display)
     m_currentWindowCenter = newCenter;
     m_currentWindowWidth = newWidth;
     
+    // Scale window values for pipeline processing based on bit depth
+    double pipelineCenter, pipelineWidth;
+    int bitsStored = m_imagePipeline->getBitsStored();
     
-    // Update the pipeline with new values
-    m_imagePipeline->setWindowLevel(newCenter, newWidth);
+    if (bitsStored > 8) {
+        // For >8-bit images, scale window values to 8-bit range for pipeline processing
+        double maxOriginalValue = (1 << bitsStored) - 1;  // e.g., 16383 for 14-bit
+        double scaleFactor = 255.0 / maxOriginalValue;    // e.g., 255/16383 ≈ 0.0156
+        
+        pipelineCenter = newCenter * scaleFactor;
+        pipelineWidth = newWidth * scaleFactor;
+    } else {
+        // For 8-bit images, use values directly
+        pipelineCenter = newCenter;
+        pipelineWidth = newWidth;
+    }
+    
+    // Update the pipeline with scaled values for internal processing
+    m_imagePipeline->setWindowLevel(pipelineCenter, pipelineWidth);
     
     // Apply window/level to current image through pipeline
     processThroughPipeline();
@@ -2953,7 +2969,24 @@ void DicomViewer::toggleWindowLevelMode()
 
 void DicomViewer::applyWindowLevel(double center, double width)
 {
-    m_imagePipeline->setWindowLevel(center, width);
+    // Scale window values for pipeline processing based on bit depth
+    double pipelineCenter, pipelineWidth;
+    int bitsStored = m_imagePipeline->getBitsStored();
+    
+    if (bitsStored > 8) {
+        // For >8-bit images, scale window values to 8-bit range for pipeline processing
+        double maxOriginalValue = (1 << bitsStored) - 1;  // e.g., 16383 for 14-bit
+        double scaleFactor = 255.0 / maxOriginalValue;    // e.g., 255/16383 ≈ 0.0156
+        
+        pipelineCenter = center * scaleFactor;
+        pipelineWidth = width * scaleFactor;
+    } else {
+        // For 8-bit images, use values directly
+        pipelineCenter = center;
+        pipelineWidth = width;
+    }
+    
+    m_imagePipeline->setWindowLevel(pipelineCenter, pipelineWidth);
     // Only enable if toggle button is ON
     if (m_windowLevelModeEnabled) {
         m_imagePipeline->setWindowLevelEnabled(true);
@@ -4335,45 +4368,83 @@ void DicomViewer::extractDicomMetadata(const QString& filePath)
         dataset->findAndGetUint16(DCM_BitsAllocated, bitsAllocated);
         
         // Extract Window/Level values - Tags (0028,1050) and (0028,1051)
+        // Store these as the ORIGINAL DICOM values that should never be modified
         bool foundWindowLevel = false;
+        double originalDicomCenter = 0.0;
+        double originalDicomWidth = 0.0;
         
-        // Window Center (Level)
+        // Window Center (Level) - store original DICOM value
         if (dataset->findAndGetFloat64(DCM_WindowCenter, floatValue).good()) {
-            m_currentWindowCenter = floatValue;
-            m_originalWindowCenter = floatValue;
+            originalDicomCenter = floatValue;
+            m_originalWindowCenter = floatValue;  // For reset functionality
             foundWindowLevel = true;
         }
         
-        // Window Width
+        // Window Width - store original DICOM value  
         if (dataset->findAndGetFloat64(DCM_WindowWidth, floatValue).good()) {
-            m_currentWindowWidth = floatValue;
-            m_originalWindowWidth = floatValue;
+            originalDicomWidth = floatValue;
+            m_originalWindowWidth = floatValue;   // For reset functionality
             foundWindowLevel = foundWindowLevel && true;
         }
+        
+        // Set current values to original DICOM values for UI display
+        // These should always show the actual DICOM values to the user
+        m_currentWindowCenter = originalDicomCenter;
+        m_currentWindowWidth = originalDicomWidth;
         
         // Store BitsStored for pipeline processing
         m_imagePipeline->setBitsStored(bitsStored);
         
-        // If window/level values found, use them for pipeline processing
-
-        
-        if (foundWindowLevel && m_currentWindowWidth > 0) {
-            m_imagePipeline->setWindowLevel(m_currentWindowCenter, m_currentWindowWidth);
+        // If window/level values found, apply them to the display pipeline
+        if (foundWindowLevel && originalDicomWidth > 0) {
+            // IMPORTANT: DCMTK's getOutputData(8) converts >8-bit data to 8-bit range (0-255)
+            // We need to scale the window/level values from original bit depth to 8-bit range
+            
+            double pipelineCenter, pipelineWidth;
+            
+            if (bitsStored > 8) {
+                // For >8-bit images, scale window values to 8-bit range
+                double maxOriginalValue = (1 << bitsStored) - 1;  // e.g., 16383 for 14-bit
+                double scaleFactor = 255.0 / maxOriginalValue;    // e.g., 255/16383 ≈ 0.0156
+                
+                pipelineCenter = originalDicomCenter * scaleFactor;
+                pipelineWidth = originalDicomWidth * scaleFactor;
+                
+                logMessage("DEBUG", QString("Scaled window values: Original C=%1 W=%2 -> 8-bit C=%3 W=%4 (scale=%5, BitsStored=%6)")
+                    .arg(originalDicomCenter).arg(originalDicomWidth)
+                    .arg(pipelineCenter).arg(pipelineWidth)
+                    .arg(scaleFactor).arg(bitsStored));
+            } else {
+                // For 8-bit images, use original values
+                pipelineCenter = originalDicomCenter;
+                pipelineWidth = originalDicomWidth;
+                
+                logMessage("DEBUG", QString("Window values applied directly: C=%1 W=%2 (8-bit image, BitsStored=%3)")
+                    .arg(originalDicomCenter).arg(originalDicomWidth).arg(bitsStored));
+            }
+            
+            // Apply scaled values to pipeline (internal processing only)
+            // This does NOT affect m_currentWindowCenter/Width which are used for UI
+            m_imagePipeline->setWindowLevel(pipelineCenter, pipelineWidth);
+            
             // Only enable if toggle button is ON
             if (m_windowLevelModeEnabled) {
                 m_imagePipeline->setWindowLevelEnabled(true);
             } else {
             }
         } else {
-            // Calculate window/level based on BitsStored when no DICOM values present
-            // Formula: WindowWidth = 2^BitsStored - 1, WindowCenter = WindowWidth / 2
-            // This utilizes the full dynamic range of the image data
-            double maxPixelValue = (1 << bitsStored) - 1;  // 2^BitsStored - 1
-            m_currentWindowWidth = maxPixelValue;
-            m_currentWindowCenter = maxPixelValue / 2.0;
+            // Calculate default window/level for 8-bit display
+            // Use 8-bit range (0-255) regardless of original bit depth
+            // since we're displaying on 8-bit pipeline
+            m_currentWindowWidth = 255.0;      // Full 8-bit range
+            m_currentWindowCenter = 127.5;     // Middle of 8-bit range
             m_originalWindowCenter = m_currentWindowCenter;
             m_originalWindowWidth = m_currentWindowWidth;
             m_imagePipeline->setWindowLevel(m_currentWindowCenter, m_currentWindowWidth);
+            
+            logMessage("DEBUG", QString("Default windowing: C=%1 W=%2 (8-bit defaults)")
+                .arg(m_currentWindowCenter).arg(m_currentWindowWidth));
+                
             // Only enable if toggle button is ON
             if (m_windowLevelModeEnabled) {
                 m_imagePipeline->setWindowLevelEnabled(true);
