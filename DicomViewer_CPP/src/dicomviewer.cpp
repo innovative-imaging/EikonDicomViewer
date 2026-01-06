@@ -2257,21 +2257,70 @@ void DicomViewer::onTreeItemSelected(QTreeWidgetItem *current, QTreeWidgetItem *
     QString filePath = userData[1].toString();
     
     if (itemType == "image") {
-        // CRITICAL FIX: Normalize the file path to match how file states are stored
-        // File states use PathNormalizer paths, but tree UserData may use different format
+        // CRITICAL FIX: Check file state with original tree path first (for non-DVD mode)
+        // In non-DVD mode, files are NOT copied, so tree path should be used directly
+        QString originalPath = filePath;
         QString normalizedPath = PathNormalizer::normalize(filePath);
-        logMessage("DEBUG", QString("[PATH NORMALIZE] Tree path: %1 -> Normalized: %2").arg(filePath).arg(normalizedPath));
         
-        // LOG FILE STATE BEFORE SELECTION ATTEMPT
-        FileState currentState = getFileState(normalizedPath);
-        logMessage("INFO", QString("[USER CLICK] File: %1").arg(QFileInfo(filePath).fileName()));
-        logMessage("INFO", QString("[USER CLICK] Tree Path: %1").arg(filePath));
-        logMessage("INFO", QString("[USER CLICK] Normalized Path: %1").arg(normalizedPath));
-        logMessage("INFO", QString("[USER CLICK] Current File State: %1").arg(static_cast<int>(currentState)));
-        logMessage("INFO", QString("[USER CLICK] File Exists: %1").arg(QFile::exists(normalizedPath) ? "YES" : "NO"));
+        // Check file state with original path first (non-DVD mode)
+        FileState originalState = FileState::NotReady;
+        {
+            QMutexLocker locker(&m_fileStatesMutex);
+            originalState = m_fileStates.value(originalPath, FileState::NotReady);
+        }
+        
+        // Check file state with normalized path (DVD mode)
+        FileState normalizedState = FileState::NotReady;
+        {
+            QMutexLocker locker(&m_fileStatesMutex);
+            normalizedState = m_fileStates.value(normalizedPath, FileState::NotReady);
+        }
+        
+        // Use the path that has a valid file state (Available or DisplayReady)
+        QString effectivePath = originalPath;
+        FileState effectiveState = originalState;
+        
+        // CRITICAL: In non-DVD mode, files exist at original path, not normalized path
+        // Check file existence to determine which path to use
+        bool originalExists = QFile::exists(originalPath);
+        bool normalizedExists = QFile::exists(normalizedPath);
+        
+        if (originalExists && (originalState == FileState::Available || originalState == FileState::DisplayReady)) {
+            // Best case: Original path exists and has valid state
+            effectivePath = originalPath;
+            effectiveState = originalState;
+        } else if (originalExists && originalState == FileState::NotReady && 
+                   (normalizedState == FileState::Available || normalizedState == FileState::DisplayReady)) {
+            // Non-DVD mode: File exists at original path but state stored under normalized path
+            effectivePath = originalPath;  // Use original path where file exists
+            effectiveState = normalizedState;  // But use normalized state for validation
+        } else if (normalizedExists && (normalizedState == FileState::Available || normalizedState == FileState::DisplayReady)) {
+            // DVD mode: File exists at normalized path
+            effectivePath = normalizedPath;
+            effectiveState = normalizedState;
+        } else if (originalExists) {
+            // Fallback: Use original path if it exists, regardless of state
+            effectivePath = originalPath;
+            effectiveState = originalState;
+        } else {
+            // Final fallback: Use normalized path
+            effectivePath = normalizedPath;
+            effectiveState = normalizedState;
+        }
+        
+        logMessage("DEBUG", QString("[PATH SELECTION] Tree path: %1").arg(originalPath));
+        logMessage("DEBUG", QString("[PATH SELECTION] Normalized path: %1").arg(normalizedPath));
+        logMessage("DEBUG", QString("[PATH SELECTION] Original state: %1, Normalized state: %2").arg(static_cast<int>(originalState)).arg(static_cast<int>(normalizedState)));
+        logMessage("DEBUG", QString("[PATH SELECTION] Using effective path: %1 with state: %2").arg(effectivePath).arg(static_cast<int>(effectiveState)));
+        
+        logMessage("INFO", QString("[USER CLICK] File: %1").arg(QFileInfo(originalPath).fileName()));
+        logMessage("INFO", QString("[USER CLICK] Tree Path: %1").arg(originalPath));
+        logMessage("INFO", QString("[USER CLICK] Effective Path: %1").arg(effectivePath));
+        logMessage("INFO", QString("[USER CLICK] Current File State: %1").arg(static_cast<int>(effectiveState)));
+        logMessage("INFO", QString("[USER CLICK] File Exists: %1").arg(QFile::exists(effectivePath) ? "YES" : "NO"));
         
         // Apply selection guard - this prevents recursion AND handles DisplayReady optimization
-        if (!beginSelection(normalizedPath)) {
+        if (!beginSelection(effectivePath)) {
             return; // Selection blocked by guard (recursion, DisplayReady, or duplicate)
         }
         
@@ -2281,27 +2330,27 @@ void DicomViewer::onTreeItemSelected(QTreeWidgetItem *current, QTreeWidgetItem *
         });
         
         // Validate file state before proceeding
-        FileState fileState = getFileState(normalizedPath);
+        FileState fileState = effectiveState;
         if (fileState == FileState::NotReady || fileState == FileState::Copying) {
             QString stateNames[] = {"NotReady", "Copying", "Available", "DisplayReady"};
             QString stateName = (static_cast<int>(fileState) < 4) ? stateNames[static_cast<int>(fileState)] : "Unknown";
             
-            logMessage("WARN", QString("[SELECTION BLOCKED] File: %1").arg(QFileInfo(normalizedPath).fileName()));
+            logMessage("WARN", QString("[SELECTION BLOCKED] File: %1").arg(QFileInfo(effectivePath).fileName()));
             logMessage("WARN", QString("[SELECTION BLOCKED] State: %1 (%2) - Expected Available(2) or DisplayReady(3)")
                      .arg(stateName).arg(static_cast<int>(fileState)));
             logMessage("WARN", QString("[SELECTION BLOCKED] User cannot select files in NotReady or Copying state"));
             logMessage("DEBUG", QString("[SELECTION] File not ready for selection: %1 State: %2")
-                     .arg(normalizedPath).arg(static_cast<int>(fileState)));
+                     .arg(effectivePath).arg(static_cast<int>(fileState)));
             return;
         }
         
-        logMessage("INFO", QString("[SELECTION SUCCESS] File ready for display: %1").arg(QFileInfo(normalizedPath).fileName()));
+        logMessage("INFO", QString("[SELECTION SUCCESS] File ready for display: %1").arg(QFileInfo(effectivePath).fileName()));
         
         // Request display through monitor instead of direct loading
-        requestDisplay(normalizedPath);
+        requestDisplay(effectivePath);
         
         // Handle thumbnail synchronization
-        synchronizeThumbnailSelection(normalizedPath);
+        synchronizeThumbnailSelection(effectivePath);
         
     } else if (itemType == "report") {
         // This is a Structured Report document
@@ -7650,14 +7699,35 @@ void DicomViewer::synchronizeThumbnailSelection(const QString& filePath)
         return;
     }
     
-    // Find and select the corresponding thumbnail
+    // Try to find thumbnail by exact path match first
+    bool found = false;
     for (int i = 0; i < m_thumbnailList->count(); ++i) {
         QListWidgetItem* item = m_thumbnailList->item(i);
         if (item && item->data(Qt::UserRole).toString() == filePath) {
             m_thumbnailList->setCurrentItem(item);
             logMessage("DEBUG", QString("[THUMBNAIL SYNC] Selected thumbnail for: %1").arg(filePath));
+            found = true;
             break;
         }
+    }
+    
+    // If not found, try with normalized path comparison for cross-compatibility
+    if (!found) {
+        QString normalizedPath = PathNormalizer::normalize(filePath);
+        for (int i = 0; i < m_thumbnailList->count(); ++i) {
+            QListWidgetItem* item = m_thumbnailList->item(i);
+            QString thumbnailPath = item->data(Qt::UserRole).toString();
+            if (item && (PathNormalizer::normalize(thumbnailPath) == normalizedPath)) {
+                m_thumbnailList->setCurrentItem(item);
+                logMessage("DEBUG", QString("[THUMBNAIL SYNC] Selected thumbnail via normalized match: %1 -> %2").arg(filePath).arg(thumbnailPath));
+                found = true;
+                break;
+            }
+        }
+    }
+    
+    if (!found) {
+        logMessage("DEBUG", QString("[THUMBNAIL SYNC] No thumbnail found for: %1").arg(filePath));
     }
 }
 
@@ -7952,20 +8022,61 @@ void DicomViewer::checkForFirstAvailableImage()
         
         if (userData.size() >= 2 && userData[0].toString() == "image") {
             QString filePath = userData[1].toString();
-            FileState state = getFileState(filePath);
             
-            if (checkCount % 10 == 1) { // Detailed logging every 1.5 seconds
-                logMessage("DEBUG", QString("[FIRST IMAGE MONITOR] Checking file: %1 - State: %2").arg(filePath).arg(static_cast<int>(state)));
+            // Check file state with both original and normalized paths (like tree click handler)
+            FileState originalState = FileState::NotReady;
+            {
+                QMutexLocker locker(&m_fileStatesMutex);
+                originalState = m_fileStates.value(filePath, FileState::NotReady);
             }
             
-            if (state == FileState::Available) {
+            FileState normalizedState = getFileState(filePath); // This normalizes internally
+            
+            // Use the path that has a valid file state
+            FileState effectiveState = originalState;
+            QString effectivePath = filePath;
+            
+            // CRITICAL: In non-DVD mode, files exist at original path, not normalized path
+            // Check file existence to determine which path to use
+            bool originalExists = QFile::exists(filePath);
+            QString normalizedPath = PathNormalizer::normalize(filePath);
+            bool normalizedExists = QFile::exists(normalizedPath);
+            
+            if (originalExists && (originalState == FileState::Available || originalState == FileState::DisplayReady)) {
+                // Best case: Original path exists and has valid state
+                effectivePath = filePath;
+                effectiveState = originalState;
+            } else if (originalExists && originalState == FileState::NotReady && 
+                       (normalizedState == FileState::Available || normalizedState == FileState::DisplayReady)) {
+                // Non-DVD mode: File exists at original path but state stored under normalized path
+                effectivePath = filePath;  // Use original path where file exists
+                effectiveState = normalizedState;  // But use normalized state for validation
+            } else if (normalizedExists && (normalizedState == FileState::Available || normalizedState == FileState::DisplayReady)) {
+                // DVD mode: File exists at normalized path
+                effectivePath = normalizedPath;
+                effectiveState = normalizedState;
+            } else if (originalExists) {
+                // Fallback: Use original path if it exists, regardless of state
+                effectivePath = filePath;
+                effectiveState = originalState;
+            } else {
+                // Final fallback: Use normalized path
+                effectivePath = normalizedPath;
+                effectiveState = normalizedState;
+            }
+            
+            if (checkCount % 10 == 1) { // Detailed logging every 1.5 seconds
+                logMessage("DEBUG", QString("[FIRST IMAGE MONITOR] Checking file: %1 - Original State: %2, Normalized State: %3").arg(filePath).arg(static_cast<int>(originalState)).arg(static_cast<int>(normalizedState)));
+            }
+            
+            if (effectiveState == FileState::Available) {
                 m_firstImageFound = true;
                 stopFirstImageMonitor();
                 
-                logMessage("DEBUG", QString("[FIRST IMAGE MONITOR] Found first available image after %1 checks: %2").arg(checkCount).arg(filePath));
+                logMessage("DEBUG", QString("[FIRST IMAGE MONITOR] Found first available image after %1 checks: %2").arg(checkCount).arg(effectivePath));
                 
                 // Request display of the first available image
-                requestDisplay(filePath);
+                requestDisplay(effectivePath);
                 return;
             }
         }
