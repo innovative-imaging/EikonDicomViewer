@@ -2627,20 +2627,20 @@ void DicomViewer::updateOverlayInfo()
     // LAO/RAO (Primary Angle)
     if (m_hasPositionerAngles) {
         if (m_currentPositionerPrimaryAngle > 0) {
-            bottomLeftText += QString("LAO: %1?\n").arg(m_currentPositionerPrimaryAngle, 0, 'f', 1);
+            bottomLeftText += QString("LAO: %1°\n").arg(m_currentPositionerPrimaryAngle, 0, 'f', 1);
         } else if (m_currentPositionerPrimaryAngle < 0) {
-            bottomLeftText += QString("RAO: %1?\n").arg(qAbs(m_currentPositionerPrimaryAngle), 0, 'f', 1);
+            bottomLeftText += QString("RAO: %1°\n").arg(qAbs(m_currentPositionerPrimaryAngle), 0, 'f', 1);
         } else {
-            bottomLeftText += "LAO: 0?\n";
+            bottomLeftText += "LAO: 0°\n";
         }
         
         // CRAN/CAUD (Secondary Angle)
         if (m_currentPositionerSecondaryAngle > 0) {
-            bottomLeftText += QString("CAUD: %1?\n").arg(m_currentPositionerSecondaryAngle, 0, 'f', 1);
+            bottomLeftText += QString("CAUD: %1°\n").arg(m_currentPositionerSecondaryAngle, 0, 'f', 1);
         } else if (m_currentPositionerSecondaryAngle < 0) {
-            bottomLeftText += QString("CRAN: %1?\n").arg(qAbs(m_currentPositionerSecondaryAngle), 0, 'f', 1);
+            bottomLeftText += QString("CRAN: %1°\n").arg(qAbs(m_currentPositionerSecondaryAngle), 0, 'f', 1);
         } else {
-            bottomLeftText += "CRAN: 0?\n";
+            bottomLeftText += "CRAN: 0°\n";
         }
     } else {
         bottomLeftText += "LAO/RAO: --\n";
