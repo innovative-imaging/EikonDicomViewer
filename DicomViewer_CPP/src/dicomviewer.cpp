@@ -6577,11 +6577,74 @@ void DicomViewer::onCopyCompleted(bool success)
         // Reset thumbnail completion flag for regeneration
         m_allThumbnailsComplete = false;
         
-        logMessage("INFO", "[DVD COPY] *** COPY COMPLETED - Will update file states after tree repopulation ***");
+        logMessage("INFO", "[DVD COPY] *** COPY COMPLETED - Will update file states IMMEDIATELY for user selections ***");
+        
+        // CRITICAL FIX: Update file states IMMEDIATELY when copy completes
+        // This prevents the timing gap where users can select files before state updates
+        if (m_dicomTree) {
+            QMutexLocker locker(&m_fileStatesMutex);
+            QTreeWidgetItemIterator fileIt(m_dicomTree);
+            int immediatelyMarkedAvailable = 0;
+            while (*fileIt) {
+                QVariantList userData = (*fileIt)->data(0, Qt::UserRole).toList();
+                if (userData.size() >= 2 && (userData[0].toString() == "image" || userData[0].toString() == "report")) {
+                    QString filePath = userData[1].toString();
+                    QString normalizedPath = PathNormalizer::normalize(filePath);
+                    
+                    // Check if copied file exists at destination
+                    if (QFile::exists(filePath) || QFile::exists(normalizedPath)) {
+                        FileState oldState = m_fileStates.value(filePath, FileState::NotReady);
+                        if (oldState != FileState::Available) {
+                            m_fileStates[filePath] = FileState::Available;
+                            immediatelyMarkedAvailable++;
+                        }
+                        
+                        // Also update normalized path state if different
+                        if (normalizedPath != filePath) {
+                            FileState normalizedOldState = m_fileStates.value(normalizedPath, FileState::NotReady);
+                            if (normalizedOldState != FileState::Available) {
+                                m_fileStates[normalizedPath] = FileState::Available;
+                            }
+                        }
+                    }
+                }
+                ++fileIt;
+            }
+            locker.unlock();
+            
+            logMessage("INFO", QString("[DVD COPY] IMMEDIATELY marked %1 files as Available - users can now select them").arg(immediatelyMarkedAvailable));
+        }
         
         // Defer tree repopulation and auto-selection to avoid UI freeze
         QTimer::singleShot(100, this, [this]() {
             logMessage("DEBUG", "[UI] Starting deferred tree repopulation and auto-selection");
+            
+            // Force check if all files are complete and trigger thumbnails if needed
+            if (areAllFilesComplete()) {
+                logMessage("INFO", "[DVD COPY] All files complete after copy - triggering thumbnails");
+                updateThumbnailPanel();
+            } else {
+                // Even if not all files are tracked as complete, try to trigger thumbnails anyway
+                // since the copy operation has completed successfully
+                logMessage("INFO", "[DVD COPY] Copy completed but not all files tracked - forcing thumbnail check");
+                
+                // Log debug info about file states
+                QMutexLocker locker(&m_fileStatesMutex);
+                int totalFiles = getTotalFileCount();
+                int availableFiles = 0;
+                for (auto it = m_fileStates.begin(); it != m_fileStates.end(); ++it) {
+                    if (it.value() == FileState::Available || it.value() == FileState::DisplayReady) {
+                        availableFiles++;
+                    }
+                }
+                locker.unlock();
+                
+                logMessage("DEBUG", QString("[DVD COPY] File state summary: %1 available of %2 total").arg(availableFiles).arg(totalFiles));
+                
+                // Force thumbnail update even if not all files are tracked as complete
+                // The copy is done, so we should show what we have
+                updateThumbnailPanel();
+            }
             
             // Refresh DICOM tree to show newly copied files
         if (m_dicomReader) {
@@ -6608,28 +6671,9 @@ void DicomViewer::onCopyCompleted(bool success)
                 logMessage("DEBUG", "[DVD COPY] Initializing file states after tree repopulation");
                 initializeFileStatesFromTree();
                 
-                // Mark ALL files as Available since DVD copy completed successfully
-                logMessage("INFO", "[DVD COPY] Marking all files as Available after successful copy...");
-                QMutexLocker locker(&m_fileStatesMutex);
-                QTreeWidgetItemIterator fileIt(m_dicomTree);
-                int markedAsAvailable = 0;
-                while (*fileIt) {
-                    QVariantList userData = (*fileIt)->data(0, Qt::UserRole).toList();
-                    if (userData.size() >= 2 && (userData[0].toString() == "image" || userData[0].toString() == "report")) {
-                        QString filePath = userData[1].toString();
-                        if (QFile::exists(filePath)) {
-                            FileState oldState = m_fileStates.value(filePath, FileState::NotReady);
-                            if (oldState != FileState::Available) {
-                                m_fileStates[filePath] = FileState::Available;
-                                markedAsAvailable++;
-                            }
-                        }
-                    }
-                    ++fileIt;
-                }
-                locker.unlock();
-                
-                logMessage("INFO", QString("[DVD COPY] Marked %1 files as Available - thumbnail generation will auto-trigger").arg(markedAsAvailable));
+                // File states were already updated immediately when copy completed
+                // No need to mark them as Available again here
+                logMessage("INFO", "[DVD COPY] File states already updated immediately when copy completed - ready for thumbnails");
                 
                 // The file availability monitor will automatically trigger thumbnails when ready
                 // No manual intervention needed - clean separation of concerns
