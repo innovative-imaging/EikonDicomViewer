@@ -3027,17 +3027,15 @@ void DicomViewer::loadDicomDir(const QString& dicomdirPath)
         
         logMessage("DEBUG", "[LOAD DICOMDIR] detectAndStartDvdCopy() completed");
         
-        // Update thumbnail panel after DVD detection determines if copy is needed
-        updateThumbnailPanel();
-        
+       
         // Expand first level items and select first image if available
         expandFirstItems();
         
         // Initialize file states for all DICOM files
         initializeFileStatesFromTree();
         
-        // Start file availability monitoring for thumbnail generation
-        startFileAvailabilityMonitoring();
+        // NOTE: File availability monitoring will be started after first image is displayed
+        // to prevent thumbnails from blocking initial image display
         
         // Start monitoring for first available image (will check if already displaying)
         logMessage("DEBUG", "[LOAD DICOMDIR] Starting first image monitor");
@@ -7945,6 +7943,17 @@ void DicomViewer::checkAndUpdateDisplay()
                 m_requestedDisplayPath.clear();
                 
                 logMessage("DEBUG", QString("[DISPLAY MONITOR] Display completed: %1").arg(m_currentlyDisplayedPath));
+                
+                // Start file availability monitoring after first successful display
+                // This delays thumbnail generation until first image is shown
+                if (!m_fileAvailabilityMonitoringActive) {
+                    logMessage("DEBUG", "[DISPLAY MONITOR] Starting file availability monitoring after first image display");
+                    startFileAvailabilityMonitoring();
+                    // Trigger immediate check since all files might already be available
+                    QTimer::singleShot(50, this, [this]() {
+                        checkAllFilesAvailableAndTriggerThumbnails();
+                    });
+                }
             } else {
                 // Already displaying this image
                 m_requestedDisplayPath.clear();
