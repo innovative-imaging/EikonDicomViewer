@@ -2939,37 +2939,14 @@ void DicomViewer::toggleWindowLevelMode()
     
     // Enable/disable the pipeline's window/level processing
     if (m_windowLevelModeEnabled) {
-        // Enable window/level interaction mode, but don't change current settings
-        // The user needs to drag the mouse to start adjusting window/level
-        // Keep current window/level values active
+        // Enable window/level interaction mode
+        // Ensure windowing is enabled with current values
         m_imagePipeline->setWindowLevelEnabled(true);
     } else {
-        // Disable interactive window/level mode, but restore original DICOM values
-        // Don't disable windowing completely - restore to original settings
-        if (m_originalWindowWidth > 0) {
-            // Restore original DICOM window/level values
-            m_imagePipeline->setWindowLevel(m_originalWindowCenter, m_originalWindowWidth);
-            m_imagePipeline->setWindowLevelEnabled(true);
-            
-            // Update current values to reflect the restored state
-            m_currentWindowCenter = m_originalWindowCenter;
-            m_currentWindowWidth = m_originalWindowWidth;
-            
-            logMessage("DEBUG", QString("Restored original W/L: Center=%1 Width=%2")
-                     .arg(m_originalWindowCenter).arg(m_originalWindowWidth));
-        } else {
-            // Fallback: if no original values, use reasonable defaults instead of disabling
-            m_imagePipeline->setWindowLevel(127.5, 255.0);  // 8-bit defaults
-            m_imagePipeline->setWindowLevelEnabled(true);
-            
-            m_currentWindowCenter = 127.5;
-            m_currentWindowWidth = 255.0;
-            
-            logMessage("DEBUG", "No original W/L values - using 8-bit defaults");
-        }
-        
-        // Process through pipeline to apply restored values
-        processThroughPipeline();
+        // Disable window/level interaction mode, but KEEP current windowing active
+        // Do NOT disable windowing completely - just disable interaction
+        // The pipeline should continue applying the current window/level values
+        // (windowing remains enabled with last applied values)
     }
     
     // Update the button icon based on state
