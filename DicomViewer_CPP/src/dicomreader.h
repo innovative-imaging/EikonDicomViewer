@@ -81,6 +81,10 @@ public:
     
     // Update frame count for a specific file when it becomes available
     void updateFrameCountForFile(const QString& fileName);
+    
+    // Additional public methods for RDSR support
+    void updateImageDisplayNameFromFile(DicomImageInfo& image);
+    bool isRDSRFile(const QString& filePath) const;
 
 private:
     QMap<QString, DicomPatientInfo> m_patients;
@@ -92,7 +96,8 @@ private:
     bool isDicomDir(const QString& filePath);
     void clearData();
     bool isStructuredReport(const QString& filePath);
-    void updateImageDisplayNameFromFile(DicomImageInfo& image);
+    
+private:
     
 #ifdef HAVE_DCMTK
     bool parseWithDcmtk(const QString& dicomdirPath);

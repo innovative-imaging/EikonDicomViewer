@@ -335,12 +335,7 @@ DicomViewer::DicomViewer(QWidget *parent, const QString& sourceDrive)
     , m_statusLabel(nullptr)
     , m_statusProgressBar(nullptr)
     // State-based architecture initialization
-    , m_selectionInProgress(false)
     , m_thumbnailPanelProcessingActive(false)
-    , m_displayMonitor(nullptr)
-    , m_displayMonitorActive(false)
-    , m_firstImageMonitor(nullptr)
-    , m_firstImageFound(false)
 {
     // Initialize logging first
     initializeLogging();
@@ -544,7 +539,7 @@ DicomViewer::DicomViewer(QWidget *parent, const QString& sourceDrive)
     mainLayout->addWidget(m_dicomInfoWidget);
     
     // Debug: Confirm widget creation
-    logMessage("DEBUG", QString("[DICOM INFO] DICOM info widget created successfully in constructor. Widget pointer: %1").arg(reinterpret_cast<quintptr>(m_dicomInfoWidget)));
+    logMessage(LOG_DEBUG, QString("[DICOM INFO] DICOM info widget created successfully in constructor. Widget pointer: %1").arg(reinterpret_cast<quintptr>(m_dicomInfoWidget)));
     
     // Step 3: Main content area with stacked widget
     m_mainStack = new QStackedWidget;
@@ -624,9 +619,6 @@ DicomViewer::DicomViewer(QWidget *parent, const QString& sourceDrive)
     // Initialize Display Monitor System
     initializeDisplayMonitor();
     
-    // Initialize file availability monitoring state
-    m_fileAvailabilityMonitoringActive = false;
-    
     // Set global DicomViewer instance for logging functions
     g_dicomViewer = this;
     
@@ -644,10 +636,6 @@ DicomViewer::~DicomViewer()
 {
     // Clear global pointer
     g_dicomViewer = nullptr;
-    
-    // Stop monitoring systems
-    stopFileAvailabilityMonitoring();
-    stopFirstImageMonitor();
     
     if (m_playbackTimer && m_playbackTimer->isActive()) {
         m_playbackTimer->stop();
@@ -745,7 +733,7 @@ void DicomViewer::initializeDvdWorker()
     bool seqConnected = connect(this, &DicomViewer::requestSequentialRobocopyStart,
                                m_dvdWorker, &DvdCopyWorker::startSequentialRobocopy,
                                Qt::QueuedConnection);
-    logMessage("DEBUG", QString("[DVD WORKER] Sequential robocopy signal connection established: %1").arg(seqConnected ? "SUCCESS" : "FAILED"));
+    logMessage(LOG_DEBUG, QString("[DVD WORKER] Sequential robocopy signal connection established: %1").arg(seqConnected ? "SUCCESS" : "FAILED"));
     
     // Connect ffmpeg copy completion signal to slot
     connect(this, &DicomViewer::ffmpegCopyCompleted,
@@ -1412,7 +1400,7 @@ void DicomViewer::previousFrame()
 
 void DicomViewer::togglePlayback()
 {
-    logMessage("[USER ACTION] Toggle playback requested", LOG_DEBUG);
+    logMessage(LOG_DEBUG, "[USER ACTION] Toggle playback requested");
     // Use professional framework for playback control
     if (m_playbackController) {
         m_playbackController->togglePlayback();
@@ -1607,7 +1595,7 @@ void DicomViewer::showWindowLevelDialog()
 
 void DicomViewer::zoomIn()
 {
-    logMessage("[USER ACTION] Zoom in requested", LOG_DEBUG);
+    logMessage(LOG_DEBUG, "[USER ACTION] Zoom in requested");
     if (m_graphicsView && m_zoomFactor < m_maxZoomFactor) {
         m_zoomFactor *= m_zoomIncrement;
         m_graphicsView->scale(m_zoomIncrement, m_zoomIncrement);
@@ -1617,7 +1605,7 @@ void DicomViewer::zoomIn()
 
 void DicomViewer::zoomOut()
 {
-    logMessage("[USER ACTION] Zoom out requested", LOG_DEBUG);
+    logMessage(LOG_DEBUG, "[USER ACTION] Zoom out requested");
     if (m_graphicsView && m_zoomFactor > m_minZoomFactor) {
         m_zoomFactor /= m_zoomIncrement;
         m_graphicsView->scale(1.0 / m_zoomIncrement, 1.0 / m_zoomIncrement);
@@ -1724,23 +1712,22 @@ void DicomViewer::onThumbnailItemSelected(QListWidgetItem* current, QListWidgetI
             // Queue the selection instead of processing immediately
             QMutexLocker pendingLocker(&m_pendingSelectionsMutex);
             m_pendingSelections.enqueue(filePath);
-            logMessage("DEBUG", QString("Queued thumbnail selection during generation: %1").arg(filePath));
+            logMessage(LOG_DEBUG, QString("Queued thumbnail selection during generation: %1").arg(filePath));
             return;
         }
         
         // NEW: Verify file readiness
         {
-            QMutexLocker fileLocker(&m_fileStatesMutex);
-            QString fileName = QFileInfo(filePath).fileName();
-            if (m_copyInProgress && !m_fileReadyStates.value(fileName, false)) {
-                logMessage("DEBUG", QString("File not ready for selection: %1").arg(fileName));
+            QString canonicalPath = getCanonicalPath(filePath);
+            if (m_copyInProgress && !QFile::exists(canonicalPath)) {
+                logMessage(LOG_DEBUG, QString("File not ready for selection: %1").arg(QFileInfo(filePath).fileName()));
                 return;
             }
         }
         
-        logMessage("DEBUG", QString("[THUMBNAIL] Selected thumbnail with path: %1").arg(filePath));
-        logMessage("DEBUG", QString("[THUMBNAIL] Thumbnail selection - File path: %1").arg(filePath));
-        logMessage("DEBUG", QString("[THUMBNAIL] Copy in progress: %1").arg(m_copyInProgress ? "true" : "false"));
+        logMessage(LOG_DEBUG, QString("[THUMBNAIL] Selected thumbnail with path: %1").arg(filePath));
+        logMessage(LOG_DEBUG, QString("[THUMBNAIL] Thumbnail selection - File path: %1").arg(filePath));
+        logMessage(LOG_DEBUG, QString("[THUMBNAIL] Copy in progress: %1").arg(m_copyInProgress ? "true" : "false"));
         
         // Use display monitor instead of direct display
         requestDisplay(filePath);
@@ -1756,8 +1743,8 @@ void DicomViewer::onThumbnailItemSelected(QListWidgetItem* current, QListWidgetI
                     QString itemPath = userData[1].toString();
                     // CRITICAL FIX: Use defensive path comparison to handle short vs long path formats
                     if ((itemType == "image" || itemType == "report") && pathsAreEquivalent(itemPath, filePath)) {
-                        logMessage("DEBUG", QString("[THUMBNAIL] Found matching tree item for path: %1").arg(filePath));
-                        logMessage("DEBUG", QString("[THUMBNAIL] Path match found - Tree path: %1").arg(itemPath));
+                        logMessage(LOG_DEBUG, QString("[THUMBNAIL] Found matching tree item for path: %1").arg(filePath));
+                        logMessage(LOG_DEBUG, QString("[THUMBNAIL] Path match found - Tree path: %1").arg(itemPath));
                         m_dicomTree->setCurrentItem(*it);
                         foundMatch = true;
                         break;
@@ -1767,8 +1754,8 @@ void DicomViewer::onThumbnailItemSelected(QListWidgetItem* current, QListWidgetI
             }
             
             if (!foundMatch) {
-                logMessage("WARNING", QString("[THUMBNAIL] WARNING: No matching tree item found for thumbnail path: %1").arg(filePath));
-                logMessage("WARNING", "[THUMBNAIL] This indicates a path mismatch between thumbnails and tree items");
+                logMessage(LOG_WARN, QString("[THUMBNAIL] WARNING: No matching tree item found for thumbnail path: %1").arg(filePath));
+                logMessage(LOG_WARN, "[THUMBNAIL] This indicates a path mismatch between thumbnails and tree items");
                 
                 // Try to find a tree item with the same filename but different path
                 QString fileName = QFileInfo(filePath).fileName();
@@ -1780,11 +1767,11 @@ void DicomViewer::onThumbnailItemSelected(QListWidgetItem* current, QListWidgetI
                         QString itemPath = userData[1].toString();
                         QString treeFileName = QFileInfo(itemPath).fileName();
                         if ((itemType == "image" || itemType == "report") && treeFileName == fileName) {
-                            logMessage("DEBUG", "[THUMBNAIL] Found tree item with same filename but different path:");
-                            logMessage("DEBUG", QString("[THUMBNAIL]   Thumbnail path: %1").arg(filePath));
-                            logMessage("DEBUG", QString("[THUMBNAIL]   Tree item path: %1").arg(itemPath));
-                            logMessage("DEBUG", "[THUMBNAIL] Selecting tree item with local path");
-                            logMessage("DEBUG", QString("[THUMBNAIL] Fallback match - Thumbnail: %1 Tree: %2").arg(filePath, itemPath));
+                            logMessage(LOG_DEBUG, "[THUMBNAIL] Found tree item with same filename but different path:");
+                            logMessage(LOG_DEBUG, QString("[THUMBNAIL]   Thumbnail path: %1").arg(filePath));
+                            logMessage(LOG_DEBUG, QString("[THUMBNAIL]   Tree item path: %1").arg(itemPath));
+                            logMessage(LOG_DEBUG, "[THUMBNAIL] Selecting tree item with local path");
+                            logMessage(LOG_DEBUG, QString("[THUMBNAIL] Fallback match - Thumbnail: %1 Tree: %2").arg(filePath, itemPath));
                             m_dicomTree->setCurrentItem(*it2);
                             break;
                         }
@@ -1819,10 +1806,9 @@ void DicomViewer::updateThumbnailPanel()
         return;
     }
     
-    // NEW: Only create thumbnails if ALL files are complete (have cine/image icons)
+    // Only create thumbnails if ALL files exist on disk
     if (!areAllFilesComplete()) {
-        logMessage("DEBUG", "[THUMBNAIL PANEL] Delaying thumbnail creation - not all files are complete yet");
-        logMessage("DEBUG", QString("[THUMBNAIL PANEL] Completed: %1, Total in tree: %2").arg(m_fullyCompletedFiles.size()).arg(getTotalFileCount()));
+        logMessage("DEBUG", "[THUMBNAIL PANEL] Delaying thumbnail creation - not all files exist yet");
         return;
     }
     
@@ -1990,16 +1976,19 @@ void DicomViewer::onThumbnailTaskCompleted(const QString& filePath, const QPixma
 
 void DicomViewer::checkAndShowThumbnailPanel()
 {
-    // Only show the thumbnail panel if all conditions are met:
-    // 1. All thumbnails are generated
-    // 2. No copy operation is in progress
-    // 3. No DVD detection is in progress
-    if (m_allThumbnailsComplete && !m_copyInProgress && !m_dvdDetectionInProgress) {
-        m_thumbnailPanel->setVisible(true);
-        logMessage("DEBUG", "Thumbnail panel shown - all operations complete");
+    // Show the thumbnail panel if thumbnails are complete and no blocking operations
+    // DVD detection doesn't block thumbnail display - only active copying does
+    if (m_allThumbnailsComplete && !m_copyInProgress) {
+        if (m_thumbnailPanel) {
+            m_thumbnailPanel->setVisible(true);
+            logMessage("DEBUG", "Thumbnail panel shown - thumbnails complete and no copy in progress");
+        }
     } else {
-        logMessage("DEBUG", QString("Thumbnail panel not shown - operations still in progress: thumbnailsComplete: %1, copyInProgress: %2, dvdDetectionInProgress: %3")
-                   .arg(m_allThumbnailsComplete).arg(m_copyInProgress).arg(m_dvdDetectionInProgress));
+        if (m_thumbnailPanel) {
+            m_thumbnailPanel->setVisible(false);
+            logMessage("DEBUG", QString("Thumbnail panel hidden - thumbnailsComplete: %1, copyInProgress: %2")
+                       .arg(m_allThumbnailsComplete).arg(m_copyInProgress));
+        }
     }
 }
 
@@ -2238,12 +2227,12 @@ void DicomViewer::onTreeItemSelected(QTreeWidgetItem *current, QTreeWidgetItem *
         return;
     }
     
-    logMessage("DEBUG", QString("[USER ACTION] Tree item selected: %1").arg(current->text(0)));
+    logMessage("DEBUG", QString("[USER ACTION] Tree item selected: %1 (Copy in progress: %2)").arg(current->text(0)).arg(m_copyInProgress));
     
-    // Extract file path and type
+    // Extract file path and type from tree item
     QVariantList userData = current->data(0, Qt::UserRole).toList();
     if (userData.size() < 2) {
-        // Handle non-image selections
+        // Handle non-image selections (series, study, patient)
         m_imageLabel->setText("Selected: " + current->text(0));
         m_mainStack->setCurrentWidget(m_imageWidget);
         return;
@@ -2252,132 +2241,63 @@ void DicomViewer::onTreeItemSelected(QTreeWidgetItem *current, QTreeWidgetItem *
     QString itemType = userData[0].toString();
     QString filePath = userData[1].toString();
     
-    if (itemType == "image") {
-        // CRITICAL FIX: Check file state with original tree path first (for non-DVD mode)
-        // In non-DVD mode, files are NOT copied, so tree path should be used directly
-        QString originalPath = filePath;
-        QString normalizedPath = PathNormalizer::normalize(filePath);
+    if (filePath.isEmpty()) {
+        // Handle non-file selections
+        m_imageLabel->setText("Selected: " + current->text(0));
+        m_mainStack->setCurrentWidget(m_imageWidget);
+        return;
+    }
+    
+    // Check if copy is in progress and file is not yet available
+    if (m_copyInProgress) {
+        QString canonicalPath = getCanonicalPath(filePath);
+        bool fileExists = QFile::exists(canonicalPath);
         
-        // Check file state with original path first (non-DVD mode)
-        FileState originalState = FileState::NotReady;
-        {
-            QMutexLocker locker(&m_fileStatesMutex);
-            originalState = m_fileStates.value(originalPath, FileState::NotReady);
-        }
+        logMessage("DEBUG", QString("[USER CLICK DEBUG] Copy in progress - File: %1, Canonical: %2, Exists: %3")
+            .arg(QFileInfo(filePath).fileName())
+            .arg(QFileInfo(canonicalPath).fileName())
+            .arg(fileExists));
         
-        // Check file state with normalized path (DVD mode)
-        FileState normalizedState = FileState::NotReady;
-        {
-            QMutexLocker locker(&m_fileStatesMutex);
-            normalizedState = m_fileStates.value(normalizedPath, FileState::NotReady);
-        }
-        
-        // Use the path that has a valid file state (Available or DisplayReady)
-        QString effectivePath = originalPath;
-        FileState effectiveState = originalState;
-        
-        // CRITICAL: In non-DVD mode, files exist at original path, not normalized path
-        // Check file existence to determine which path to use
-        bool originalExists = QFile::exists(originalPath);
-        bool normalizedExists = QFile::exists(normalizedPath);
-        
-        if (originalExists && (originalState == FileState::Available || originalState == FileState::DisplayReady)) {
-            // Best case: Original path exists and has valid state
-            effectivePath = originalPath;
-            effectiveState = originalState;
-        } else if (originalExists && originalState == FileState::NotReady && 
-                   (normalizedState == FileState::Available || normalizedState == FileState::DisplayReady)) {
-            // Non-DVD mode: File exists at original path but state stored under normalized path
-            effectivePath = originalPath;  // Use original path where file exists
-            effectiveState = normalizedState;  // But use normalized state for validation
-        } else if (normalizedExists && (normalizedState == FileState::Available || normalizedState == FileState::DisplayReady)) {
-            // DVD mode: File exists at normalized path
-            effectivePath = normalizedPath;
-            effectiveState = normalizedState;
-        } else if (originalExists) {
-            // Fallback: Use original path if it exists, regardless of state
-            effectivePath = originalPath;
-            effectiveState = originalState;
-        } else {
-            // Final fallback: Use normalized path
-            effectivePath = normalizedPath;
-            effectiveState = normalizedState;
-        }
-        
-        logMessage("DEBUG", QString("[PATH SELECTION] Tree path: %1").arg(originalPath));
-        logMessage("DEBUG", QString("[PATH SELECTION] Normalized path: %1").arg(normalizedPath));
-        logMessage("DEBUG", QString("[PATH SELECTION] Original state: %1, Normalized state: %2").arg(static_cast<int>(originalState)).arg(static_cast<int>(normalizedState)));
-        logMessage("DEBUG", QString("[PATH SELECTION] Using effective path: %1 with state: %2").arg(effectivePath).arg(static_cast<int>(effectiveState)));
-        
-        logMessage("INFO", QString("[USER CLICK] File: %1").arg(QFileInfo(originalPath).fileName()));
-        logMessage("INFO", QString("[USER CLICK] Tree Path: %1").arg(originalPath));
-        logMessage("INFO", QString("[USER CLICK] Effective Path: %1").arg(effectivePath));
-        logMessage("INFO", QString("[USER CLICK] Current File State: %1").arg(static_cast<int>(effectiveState)));
-        logMessage("INFO", QString("[USER CLICK] File Exists: %1").arg(QFile::exists(effectivePath) ? "YES" : "NO"));
-        
-        // Apply selection guard - this prevents recursion AND handles DisplayReady optimization
-        if (!beginSelection(effectivePath)) {
-            return; // Selection blocked by guard (recursion, DisplayReady, or duplicate)
-        }
-        
-        // Ensure proper cleanup using RAII
-        QScopeGuard selectionGuard([this]() {
-            endSelection();
-        });
-        
-        // Validate file state before proceeding
-        FileState fileState = effectiveState;
-        if (fileState == FileState::NotReady || fileState == FileState::Copying) {
-            QString stateNames[] = {"NotReady", "Copying", "Available", "DisplayReady"};
-            QString stateName = (static_cast<int>(fileState) < 4) ? stateNames[static_cast<int>(fileState)] : "Unknown";
-            
-            logMessage("WARN", QString("[SELECTION BLOCKED] File: %1").arg(QFileInfo(effectivePath).fileName()));
-            logMessage("WARN", QString("[SELECTION BLOCKED] State: %1 (%2) - Expected Available(2) or DisplayReady(3)")
-                     .arg(stateName).arg(static_cast<int>(fileState)));
-            logMessage("WARN", QString("[SELECTION BLOCKED] User cannot select files in NotReady or Copying state"));
-            logMessage("DEBUG", QString("[SELECTION] File not ready for selection: %1 State: %2")
-                     .arg(effectivePath).arg(static_cast<int>(fileState)));
+        // Only block if file doesn't exist yet
+        if (!fileExists) {
+            updateStatusBar("Loading files from DVD, please wait...");
+            logMessage("INFO", QString("[USER CLICK BLOCKED] File not ready yet: %1").arg(QFileInfo(filePath).fileName()));
             return;
         }
         
-        logMessage("INFO", QString("[SELECTION SUCCESS] File ready for display: %1").arg(QFileInfo(effectivePath).fileName()));
-        
-        // Request display through monitor instead of direct loading
-        requestDisplay(effectivePath);
-        
-        // Handle thumbnail synchronization
-        synchronizeThumbnailSelection(effectivePath);
-        
-    } else if (itemType == "report") {
-        // This is a Structured Report document
-        m_imageLabel->setText("Selected: " + current->text(0));
-        m_mainStack->setCurrentWidget(m_reportArea);
-        
-        // Check if the file path is valid before trying to display report
-        QFileInfo fileInfo(filePath);
-        if (!fileInfo.exists() || fileInfo.isDir()) {
-            QString errorMsg = QString("SR Document Error\n\n");
-            errorMsg += QString("Item: %1\n").arg(current->text(0));
-            errorMsg += QString("Path: %1\n\n").arg(filePath);
-            if (fileInfo.isDir()) {
-                errorMsg += "Error: Path points to a directory instead of a DICOM file.\n";
-                errorMsg += "This SR document entry in the DICOMDIR is malformed.\n\n";
-            } else {
-                errorMsg += "Error: File does not exist.\n\n";
-            }
-            errorMsg += "Possible solutions:\n";
-            errorMsg += "- Check if the DICOM files are in the correct location\n";
-            errorMsg += "- Verify the DICOMDIR file is not corrupted\n";
-            errorMsg += "- Ensure all referenced files exist in the dataset";
-            
-            m_reportArea->setPlainText(errorMsg);
+        logMessage("DEBUG", QString("[USER CLICK ALLOWED] File is available during copy: %1")
+            .arg(QFileInfo(filePath).fileName()));
+    }
+    
+    // Get canonical path for file access
+    QString canonicalPath = getCanonicalPath(filePath);
+    
+    if (QFile::exists(canonicalPath)) {
+        if (itemType == "report") {
+            // Handle Structured Report (SR) documents
+            logMessage("INFO", QString("[USER CLICK] Loading SR report: %1").arg(QFileInfo(filePath).fileName()));
+            displayReport(canonicalPath);
+            m_mainStack->setCurrentWidget(m_reportArea);
+            updateStatusBar(QString("Displaying report: %1").arg(QFileInfo(filePath).fileName()));
         } else {
-            displayReport(filePath);
+            // Handle DICOM images
+            logMessage("INFO", QString("[USER CLICK] Loading image: %1").arg(QFileInfo(filePath).fileName()));
+            loadDicomImage(canonicalPath);
+            m_mainStack->setCurrentWidget(m_imageWidget);
+            updateStatusBar(QString("Displaying: %1").arg(QFileInfo(filePath).fileName()));
+            
+            // If thumbnails are not yet visible, store this selection to restore later
+            if (!m_thumbnailPanel->isVisible()) {
+                m_pendingTreeSelection = filePath;  // Store original path for proper thumbnail matching
+                logMessage("DEBUG", QString("Storing pending selection (thumbnails not ready): %1").arg(QFileInfo(filePath).fileName()));
+            }
+            
+            // Handle thumbnail synchronization if needed (use original path for matching)
+            synchronizeThumbnailSelection(filePath);
         }
     } else {
-        // Other types (series, study, patient) - just show selection
-        m_imageLabel->setText("Selected: " + current->text(0));
-        m_mainStack->setCurrentWidget(m_imageWidget);
+        updateStatusBar("File not yet available");
+        logMessage("INFO", QString("[USER CLICK] File not available: %1").arg(QFileInfo(filePath).fileName()));
     }
 }
 
@@ -2679,8 +2599,6 @@ void DicomViewer::updateOverlayInfo()
     // Window/Level values - show if window width is positive (center can be negative)
     if (m_currentWindowWidth > 0) {
         bottomRightText += QString("WL: %1 WW: %2").arg(m_currentWindowCenter, 0, 'f', 0).arg(m_currentWindowWidth, 0, 'f', 0);
-        logMessage("DEBUG", QString("UI OVERLAY DISPLAY: WL=%1 WW=%2 (from m_currentWindow variables)")
-            .arg(m_currentWindowCenter, 0, 'f', 0).arg(m_currentWindowWidth, 0, 'f', 0));
     } else {
         // Show current pipeline values as fallback
         double pipelineCenter = m_imagePipeline->getWindowCenter();
@@ -2999,9 +2917,6 @@ void DicomViewer::loadDicomDir(const QString& dicomdirPath)
 {
     logMessage("DEBUG", QString("loadDicomDir called with path: %1").arg(dicomdirPath));
     
-    // Stop any existing first image monitor
-    stopFirstImageMonitor();
-    
     try {
         // Clear existing data
         m_dicomTree->clear();
@@ -3031,36 +2946,43 @@ void DicomViewer::loadDicomDir(const QString& dicomdirPath)
         // Expand first level items and select first image if available
         expandFirstItems();
         
-        // Initialize file states for all DICOM files
-        initializeFileStatesFromTree();
+        // Hide thumbnail panel during copy operations
+        if (m_copyInProgress) {
+            if (m_thumbnailPanel) {
+                m_thumbnailPanel->hide();
+                logMessage("DEBUG", "[THUMBNAIL PANEL] Hidden during copy operations");
+            }
+        } else {
+            // For non-DVD mode, start thumbnail generation immediately
+            logMessage("DEBUG", "[LOAD DICOMDIR] Starting thumbnail generation for non-DVD mode");
+            QTimer::singleShot(0, this, &DicomViewer::updateThumbnailPanel);
+        }
         
-        // NOTE: File availability monitoring will be started after first image is displayed
-        // to prevent thumbnails from blocking initial image display
+        // Start monitoring for first available image
+        // EVENT-BASED: First image will be auto-selected when updateTreeIconForFile()
+        // detects the first available file during icon updates
         
-        // Start monitoring for first available image (will check if already displaying)
-        logMessage("DEBUG", "[LOAD DICOMDIR] Starting first image monitor");
-        startFirstImageMonitor();
-        
-        // For local files (no DVD copy needed), auto-select first image after tree population
-        QTimer::singleShot(100, [this]() {
-            logMessage("DEBUG", QString("[AUTO-SELECT DEBUG] Timer triggered - copyInProgress: %1, dvdDetectionInProgress: %2, firstImageAutoSelected: %3")
-                     .arg(m_copyInProgress).arg(m_dvdDetectionInProgress).arg(m_firstImageAutoSelected));
+        // For local files (no DVD copy needed), auto-select first image after tree is ready
+        if (!m_copyInProgress && !m_dvdDetectionInProgress) {
+            logMessage("DEBUG", "[LOCAL FILES] Scheduling auto-selection for local DICOMDIR");
             
-            if (!m_copyInProgress && !m_dvdDetectionInProgress && !m_firstImageAutoSelected) {
-                logMessage("DEBUG", "[LOCAL FILES] Auto-selecting first image for local DICOMDIR");
-                autoSelectFirstAvailableImage();  // Use our new state-based method
-            } else {
-                logMessage("DEBUG", "[LOCAL FILES] Auto-selection blocked by flags");
-            }
-        });
-        
-        // Backup timer for auto-selection in case the first one doesn't work
-        QTimer::singleShot(500, [this]() {
-            if (!m_dicomTree->currentItem() && m_dicomTree->topLevelItemCount() > 0) {
-                logMessage("DEBUG", "[AUTO-SELECT BACKUP] No tree item selected, forcing selection with state-based method");
-                autoSelectFirstAvailableImage();  // Use our new state-based method
-            }
-        });
+            // Defer to next event loop cycle to ensure tree widget is fully ready
+            QTimer::singleShot(0, [this]() {
+                QTreeWidgetItemIterator it(m_dicomTree);
+                while (*it) {
+                    QVariantList userData = (*it)->data(0, Qt::UserRole).toList();
+                    if (userData.size() >= 2 && userData[0].toString() == "image") {
+                        QString filePath = userData[1].toString();
+                        if (QFile::exists(filePath)) {
+                            logMessage("INFO", QString("[LOCAL FILES] Auto-selecting first available image: %1").arg(QFileInfo(filePath).fileName()));
+                            m_dicomTree->setCurrentItem(*it);
+                            break; // Exit after first successful selection
+                        }
+                    }
+                    ++it;
+                }
+            });
+        }
         
         // Update display message
         if (m_dicomReader->getTotalImages() > 0) {
@@ -3073,7 +2995,6 @@ void DicomViewer::loadDicomDir(const QString& dicomdirPath)
         } else {
             m_imageLabel->setText("DICOMDIR loaded but no images found.");
         }
-        
         
     } catch (const std::exception& e) {
         m_imageLabel->setText("Error loading DICOMDIR file.");
@@ -3398,6 +3319,10 @@ void DicomViewer::expandFirstItems()
     if (m_dicomTree->topLevelItemCount() > 0) {
         logMessage("DEBUG", QString("[EXPAND FIRST] Found %1 top level items").arg(m_dicomTree->topLevelItemCount()));
         
+        // Temporarily disable selection signals to prevent automatic selection during expansion
+        disconnect(m_dicomTree, &QTreeWidget::currentItemChanged,
+                   this, &DicomViewer::onTreeItemSelected);
+        
         // Expand all patients to show their studies
         for (int i = 0; i < m_dicomTree->topLevelItemCount(); i++) {
             QTreeWidgetItem* patient = m_dicomTree->topLevelItem(i);
@@ -3413,14 +3338,17 @@ void DicomViewer::expandFirstItems()
                     QTreeWidgetItem* firstSeries = firstStudy->child(0);
                     firstSeries->setExpanded(true);
                     
-                    // CRITICAL: Remove auto-selection to break recursion
-                    // OLD CODE (CAUSES RECURSION): 
-                    // onTreeItemSelected(firstImage, nullptr);
-                    
                     logMessage("DEBUG", "[EXPAND FIRST] Tree expanded without auto-selection to prevent recursion");
                 }
             }
         }
+        
+        // Re-enable selection signals after expansion is complete
+        connect(m_dicomTree, &QTreeWidget::currentItemChanged,
+                this, &DicomViewer::onTreeItemSelected);
+        
+        // Clear any automatic selection that might have occurred
+        m_dicomTree->setCurrentItem(nullptr);
         
         // Use safe auto-selection method instead
         QTimer::singleShot(100, this, &DicomViewer::autoSelectFirstAvailableImage);
@@ -3439,10 +3367,8 @@ void DicomViewer::loadDicomImage(const QString& filePath)
     
     // NEW: Verify file readiness
     {
-        QMutexLocker fileLocker(&m_fileStatesMutex);
-        QString fileName = QFileInfo(filePath).fileName();
-        if (m_copyInProgress && !m_fileReadyStates.value(fileName, false)) {
-            logMessage("WARN", QString("Cannot load image - file not ready: %1").arg(fileName));
+        if (m_copyInProgress && !QFile::exists(filePath)) {
+            logMessage("WARN", QString("Cannot load image - file not ready: %1").arg(QFileInfo(filePath).fileName()));
             return;
         }
     }
@@ -3633,6 +3559,12 @@ void DicomViewer::loadDicomImage(const QString& filePath)
                 
                 // Check if it's a Structured Report
                 if (sopClassUID.find("1.2.840.10008.5.1.4.1.1.88") != OFString_npos) {
+                    // Check specifically for RDSR
+                    if (sopClassUID == "1.2.840.10008.5.1.4.1.1.88.67") {
+                        logMessage("INFO", QString("Loading RDSR (Radiation Dose Structured Report): %1").arg(actualFilePath));
+                    } else {
+                        logMessage("INFO", QString("Loading Structured Report: %1").arg(actualFilePath));
+                    }
                     // This is a Structured Report - display it
                     displayReport(actualFilePath);
                     return;
@@ -6371,11 +6303,9 @@ void DicomViewer::onWorkerReady()
         
         emit requestSequentialRobocopyStart(m_pendingDvdPath, m_pendingOrderedFiles);
         
-        // START FIRST IMAGE MONITOR EARLY - during copy initiation
-        // This ensures first image displays as soon as first file is ready,
-        // not after thumbnail panel becomes visible
-        logMessage("DEBUG", "[DVD COPY] Starting first image monitor during pending copy initiation");
-        startFirstImageMonitor();
+        // EVENT-BASED FIRST IMAGE: First image will be auto-selected when
+        // updateTreeIconForFile() detects the first available file
+        logMessage("DEBUG", "[DVD COPY] Using event-based first image selection");
         
         // Clear pending data
         m_pendingDvdPath.clear();
@@ -6423,11 +6353,9 @@ void DicomViewer::onDvdDetected(const QString& dvdPath)
             logMessage("DEBUG", "[IMMEDIATE START] Worker is ready, starting sequential copy immediately");
             emit requestSequentialRobocopyStart(m_pendingDvdPath, m_pendingOrderedFiles);
             
-            // START FIRST IMAGE MONITOR EARLY - during copy initiation
-            // This ensures first image displays as soon as first file is ready,
-            // not after thumbnail panel becomes visible
-            logMessage("DEBUG", "[DVD COPY] Starting first image monitor during immediate copy initiation");
-            startFirstImageMonitor();
+            // EVENT-BASED FIRST IMAGE: First image will be auto-selected when
+            // updateTreeIconForFile() detects the first available file
+            logMessage("DEBUG", "[DVD COPY] Using event-based first image selection");
             
             // Clear pending data since we started immediately
             m_pendingDvdPath.clear();
@@ -6451,6 +6379,9 @@ void DicomViewer::onCopyStarted()
     m_copyInProgress = true;
     m_currentCopyProgress = 0;
     m_dvdDetectionInProgress = false;  // Reset detection flag when copy starts
+    
+    // Hide thumbnail panel during copy operations
+    checkAndShowThumbnailPanel();
     
     // Ensure completed files set is clear at copy start
     qDebugT() << "[COPY START DEBUG] Completed files count before clear:" << m_fullyCompletedFiles.size();
@@ -6491,26 +6422,18 @@ void DicomViewer::onFileProgress(const QString& fileName, int progress)
     logMessage(LOG_DEBUG, QString("PathNormalizer: Constructed file path for progress tracking: %1").arg(fullPath));
     
     if (progress >= 100) {
-        setFileState(fullPath, FileState::Available);
-        
         // Trigger thumbnail generation if not already queued
         ThumbnailState thumbState = getThumbnailState(fullPath);
         if (thumbState == ThumbnailState::NotGenerated) {
             setThumbnailState(fullPath, ThumbnailState::Queued);
         }
         
-        // Auto-select first available image if none selected
-        if (m_currentDisplayReadyFile.isEmpty()) {
-            QTimer::singleShot(500, this, &DicomViewer::autoSelectFirstAvailableImage);
+        // RESTORE WORKING FIRST IMAGE SELECTION: Auto-select first available image if none selected
+        // Use immediate auto-selection like the WithoutThumbnails version
+        if (!m_firstImageAutoSelected && !isDisplayingAnything()) {
+            logMessage("DEBUG", "[FIRST IMAGE] File completed, attempting immediate auto-selection");
+            autoSelectFirstCompletedImage();
         }
-    } else {
-        // IMPORTANT: Only set to Copying if file isn't already Available or DisplayReady
-        // This prevents completed files from being downgraded during DVD copy operations
-        FileState currentState = getFileState(fullPath);
-        if (currentState == FileState::NotReady) {
-            setFileState(fullPath, FileState::Copying);
-        }
-        // For files already Available/DisplayReady, preserve their state during copying
     }
     
     // Update status bar instead of blocking image display
@@ -6545,218 +6468,22 @@ void DicomViewer::onOverallProgress(int percentage, const QString& statusText)
 
 void DicomViewer::onCopyCompleted(bool success)
 {
-    logMessage("DEBUG", QString("*** RECEIVED onCopyCompleted signal with success: %1 ***").arg(success));
-    logMessage("DEBUG", QString("[DVD COPY] Copy completed. Success: %1").arg(success));
-    
     m_copyInProgress = false;
-    m_dvdDetectionInProgress = false; // Reset detection flag
     
-    // Stop progress monitoring
-    if (m_copyProgressTimer && m_copyProgressTimer->isActive()) {
-        m_copyProgressTimer->stop();
-    }
+    // Update all tree icons at once to ensure proper icon states
+    updateAllTreeIcons();
     
-    // Check if we should show thumbnail panel now that copy is complete
+    // TRIGGER THUMBNAIL GENERATION: Now that copying is complete, start thumbnails
+    logMessage("DEBUG", "[DVD COPY COMPLETE] Starting thumbnail generation");
+    updateThumbnailPanel();
+    
+    // Check if thumbnail panel should be shown now that copy is complete
     checkAndShowThumbnailPanel();
     
-    // Stop worker thread
-    if (m_dvdWorkerThread) {
-        m_dvdWorkerThread->quit();
-        m_dvdWorkerThread->wait();
-    }
-    
-    if (success) {
-        logMessage("INFO", "*** UNIQUE: DICOM files copy completed successfully - ENHANCED VERSION ***");
-        logMessage("INFO", "*** SUCCESS: onCopyCompleted function executed successfully ***");
-        logMessage("DEBUG", "[DVD COPY] About to handle DICOMDIR reloading and auto-selection");
-        
-        // Clear the completed files tracking since all files are now available
-        m_fullyCompletedFiles.clear();
-        logMessage("DEBUG", "Cleared completed files set - all files now fully available after DVD copy");
-        
-        // Reset thumbnail completion flag for regeneration
-        m_allThumbnailsComplete = false;
-        
-        logMessage("INFO", "[DVD COPY] *** COPY COMPLETED - Will update file states IMMEDIATELY for user selections ***");
-        
-        // CRITICAL FIX: Update file states IMMEDIATELY when copy completes
-        // This prevents the timing gap where users can select files before state updates
-        if (m_dicomTree) {
-            QMutexLocker locker(&m_fileStatesMutex);
-            QTreeWidgetItemIterator fileIt(m_dicomTree);
-            int immediatelyMarkedAvailable = 0;
-            while (*fileIt) {
-                QVariantList userData = (*fileIt)->data(0, Qt::UserRole).toList();
-                if (userData.size() >= 2 && (userData[0].toString() == "image" || userData[0].toString() == "report")) {
-                    QString filePath = userData[1].toString();
-                    QString normalizedPath = PathNormalizer::normalize(filePath);
-                    
-                    // Check if copied file exists at destination
-                    if (QFile::exists(filePath) || QFile::exists(normalizedPath)) {
-                        FileState oldState = m_fileStates.value(filePath, FileState::NotReady);
-                        if (oldState != FileState::Available) {
-                            m_fileStates[filePath] = FileState::Available;
-                            immediatelyMarkedAvailable++;
-                        }
-                        
-                        // Also update normalized path state if different
-                        if (normalizedPath != filePath) {
-                            FileState normalizedOldState = m_fileStates.value(normalizedPath, FileState::NotReady);
-                            if (normalizedOldState != FileState::Available) {
-                                m_fileStates[normalizedPath] = FileState::Available;
-                            }
-                        }
-                    }
-                }
-                ++fileIt;
-            }
-            locker.unlock();
-            
-            logMessage("INFO", QString("[DVD COPY] IMMEDIATELY marked %1 files as Available - users can now select them").arg(immediatelyMarkedAvailable));
-        }
-        
-        // Defer tree repopulation and auto-selection to avoid UI freeze
-        QTimer::singleShot(100, this, [this]() {
-            logMessage("DEBUG", "[UI] Starting deferred tree repopulation and auto-selection");
-            
-            // Force check if all files are complete and trigger thumbnails if needed
-            if (areAllFilesComplete()) {
-                logMessage("INFO", "[DVD COPY] All files complete after copy - triggering thumbnails");
-                updateThumbnailPanel();
-            } else {
-                // Even if not all files are tracked as complete, try to trigger thumbnails anyway
-                // since the copy operation has completed successfully
-                logMessage("INFO", "[DVD COPY] Copy completed but not all files tracked - forcing thumbnail check");
-                
-                // Log debug info about file states
-                QMutexLocker locker(&m_fileStatesMutex);
-                int totalFiles = getTotalFileCount();
-                int availableFiles = 0;
-                for (auto it = m_fileStates.begin(); it != m_fileStates.end(); ++it) {
-                    if (it.value() == FileState::Available || it.value() == FileState::DisplayReady) {
-                        availableFiles++;
-                    }
-                }
-                locker.unlock();
-                
-                logMessage("DEBUG", QString("[DVD COPY] File state summary: %1 available of %2 total").arg(availableFiles).arg(totalFiles));
-                
-                // Force thumbnail update even if not all files are tracked as complete
-                // The copy is done, so we should show what we have
-                updateThumbnailPanel();
-            }
-            
-            // Refresh DICOM tree to show newly copied files
-        if (m_dicomReader) {
-            QString dicomdirPath = PathNormalizer::constructRelativePath(m_localDestPath, "../DICOMDIR");
-            logMessage(LOG_DEBUG, QString("PathNormalizer: Constructed DICOMDIR path: %1").arg(dicomdirPath));
-            if (QFile::exists(dicomdirPath)) {
-                // Store current selection before repopulating tree
-                QTreeWidgetItem* currentSelection = m_dicomTree->currentItem();
-                QString selectedFilePath;
-                bool wasImageSelected = false;
-                if (currentSelection) {
-                    QVariantList userData = currentSelection->data(0, Qt::UserRole).toList();
-                    if (userData.size() >= 2) {
-                        QString type = userData[0].toString();
-                        selectedFilePath = userData[1].toString();
-                        wasImageSelected = (type == "image");
-                    }
-                }
-                
-                m_dicomReader->loadDicomDir(dicomdirPath);
-                m_dicomReader->populateTreeWidget(m_dicomTree);
-                
-                // Initialize file states after tree repopulation
-                logMessage("DEBUG", "[DVD COPY] Initializing file states after tree repopulation");
-                initializeFileStatesFromTree();
-                
-                // File states were already updated immediately when copy completed
-                // No need to mark them as Available again here
-                logMessage("INFO", "[DVD COPY] File states already updated immediately when copy completed - ready for thumbnails");
-                
-                // The file availability monitor will automatically trigger thumbnails when ready
-                // No manual intervention needed - clean separation of concerns
-                
-                // First image monitor already started during copy initiation
-                logMessage("DEBUG", "[DVD COPY] First image monitor already active from copy initiation");
-                
-                // Temporarily disconnect the selection signal to avoid reloading
-                disconnect(m_dicomTree, &QTreeWidget::currentItemChanged,
-                          this, &DicomViewer::onTreeItemSelected);
-                
-                // Restore user selection or select first image if no user selection
-                bool selectionRestored = false;
-                if (!selectedFilePath.isEmpty()) {
-                    // Try to find and select the previously selected item
-                    QTreeWidgetItemIterator it(m_dicomTree);
-                    while (*it) {
-                        QVariantList itemData = (*it)->data(0, Qt::UserRole).toList();
-                        if (itemData.size() >= 2) {
-                            QString itemPath = itemData[1].toString();
-                            QString itemType = itemData[0].toString();
-                            
-                            // If we had an image selected, only restore to same image
-                            // If we had a series selected, restore to same series or first image in series
-                            if (itemPath == selectedFilePath) {
-                                if (wasImageSelected && itemType == "image") {
-                                    m_dicomTree->setCurrentItem(*it);
-                                    selectionRestored = true;
-                                    break;
-                                } else if (!wasImageSelected && itemType == "series") {
-                                    // User had series selected, but now select first image in that series
-                                    QTreeWidgetItem* firstImage = findFirstImageChild(*it);
-                                    if (firstImage) {
-                                        m_dicomTree->setCurrentItem(firstImage);
-                                    } else {
-                                        m_dicomTree->setCurrentItem(*it);
-                                    }
-                                    selectionRestored = true;
-                                    break;
-                                }
-                            }
-                        }
-                        ++it;
-                    }
-                }
-                
-                // If no previous selection or couldn't restore it, select first image
-                if (!selectionRestored) {
-                    logMessage("DEBUG", "[DVD COPY] No previous selection restored - triggering auto-selection");
-                    autoSelectFirstCompletedImage();
-                }
-                
-                // Start display monitor now that DVD copy is complete and tree is populated
-                logMessage("DEBUG", "[DVD COPY] Starting display monitor after successful copy completion");
-                startDisplayMonitor();
-                
-                // Reconnect the selection signal for future user interactions
-                connect(m_dicomTree, &QTreeWidget::currentItemChanged,
-                        this, &DicomViewer::onTreeItemSelected);
-            } else {
-                logMessage("WARNING", QString("[DVD COPY] DICOMDIR not found at: %1").arg(dicomdirPath));
-            }
-        } else {
-            logMessage("WARNING", "[DVD COPY] DICOM reader not available");
-        }
-        
-        // Update status bar to show completion
-        updateStatusBar("Media loading completed", -1);
-        
-            logMessage("DEBUG", "[UI] Deferred tree repopulation and auto-selection completed");
-        }); // End deferred lambda
-        
-        // Start ffmpeg copy in a separate thread after DICOM files are copied and status updated
-        QThread* ffmpegCopyThread = QThread::create([this]() {
-            copyFfmpegExe();
-        });
-        ffmpegCopyThread->start();
-        
-        // Clean up thread when it finishes
-        connect(ffmpegCopyThread, &QThread::finished, ffmpegCopyThread, &QObject::deleteLater);
-    } else {
-        // Update status bar to show failure
-        updateStatusBar("Failed to load from media", -1);
+    // Ensure first image is selected if none was selected during copy
+    if (!m_firstImageAutoSelected) {
+        logMessage("DEBUG", "[COPY COMPLETE] No first image was auto-selected during copy, trying now");
+        QTimer::singleShot(100, this, &DicomViewer::autoSelectFirstCompletedImage);
     }
 }
 
@@ -6766,6 +6493,9 @@ void DicomViewer::onWorkerError(const QString& error)
     
     m_copyInProgress = false;
     m_dvdDetectionInProgress = false; // Reset detection flag
+    
+    // Check thumbnail panel visibility after copy error
+    checkAndShowThumbnailPanel();
     
     if (m_imageLabel) {
         m_imageLabel->setText(QString("Error: %1").arg(error));
@@ -6835,10 +6565,26 @@ void DicomViewer::updateTreeItemWithProgress(const QString& fileName, int progre
         // Update the tree display to reflect new file availability with correct icons
         m_dicomReader->populateTreeWidget(m_dicomTree);
         
+        // CRITICAL: Update tree icon for this specific completed file to trigger event-based selection
+        QTreeWidgetItemIterator treeIt(m_dicomTree);
+        while (*treeIt) {
+            QVariantList userData = (*treeIt)->data(0, Qt::UserRole).toList();
+            if (userData.size() >= 2 && userData[0].toString() == "image") {
+                QString itemFilePath = userData[1].toString();
+                QString itemFileName = QFileInfo(itemFilePath).fileName();
+                if (itemFileName == baseFileName) {
+                    updateTreeIconForFile(*treeIt);
+                    break;
+                }
+            }
+            ++treeIt;
+        }
+        
         logMessage("DEBUG", QString("Tree refreshed after file completion with updated frame count: %1").arg(fileName));
         
         // NEW: Check if ALL files are now complete and trigger thumbnail creation if so
-        if (areAllFilesComplete()) {
+        // But only if thumbnails haven't been created yet to prevent multiple calls
+        if (areAllFilesComplete() && !m_allThumbnailsComplete) {
             logMessage("INFO", "[ALL FILES COMPLETE] All files now have cine/image icons - triggering thumbnail creation");
             updateThumbnailPanel();
         }
@@ -6961,12 +6707,14 @@ void DicomViewer::updateSpecificTreeItemProgress(const QString& fileName, int pr
                 
                 // CRITICAL: Use exact string comparison for DICOM filenames
                 // This prevents all files starting with "1.2.392..." from matching the same item
-                if (itemFileName == fileName) {
+                if (itemFileName.compare(fileName, Qt::CaseInsensitive) == 0) {
                     isMatch = true;
                     logMessage("DEBUG", QString("[MATCH] Exact filename match: %1 vs %2").arg(fileName).arg(itemFileName));
                 } else {
-                    // Debug mismatches to help troubleshoot
-                    logMessage("DEBUG", QString("[NO MATCH] %1 != %2").arg(fileName).arg(itemFileName));
+                    // Only log mismatches for first few items to avoid spam
+                    if (itemCount <= 5) {
+                        logMessage("DEBUG", QString("[NO MATCH] %1 != %2").arg(fileName).arg(itemFileName));
+                    }
                 }
             }
             
@@ -6986,8 +6734,15 @@ void DicomViewer::updateSpecificTreeItemProgress(const QString& fileName, int pr
                     QString progressText = QString("%1 - Loading... %2%").arg(originalText).arg(progress);
                     item->setText(0, progressText);
                     
-                    // Keep the loading icon and gray color
-                    item->setIcon(0, QIcon(":/icons/Loading.png"));
+                    // Set loading icon with fallback if resource not found
+                    QIcon loadingIcon(":/icons/Loading.png");
+                    if (loadingIcon.isNull()) {
+                        // Create animated loading icon fallback
+                        QPixmap loadingPixmap(16, 16);
+                        loadingPixmap.fill(QColor(255, 165, 0)); // Orange loading color
+                        loadingIcon = QIcon(loadingPixmap);
+                    }
+                    item->setIcon(0, loadingIcon);
                     item->setForeground(0, QColor(180, 180, 180));
                     
                     logMessage("DEBUG", QString("Updated tree item progress: %1 %2%").arg(fileName).arg(progress));
@@ -7005,7 +6760,43 @@ void DicomViewer::updateSpecificTreeItemProgress(const QString& fileName, int pr
                         
                         // Set appropriate icon based on file type and actual frame count
                         if (itemType == "report") {
-                            item->setIcon(0, QIcon(":/icons/List.png"));
+                            // Check if this is specifically an RDSR file
+                            bool isRDSR = false;
+                            if (m_dicomReader) {
+                                isRDSR = m_dicomReader->isRDSRFile(fullFilePath);
+                            }
+                            
+                            QIcon reportIcon;
+                            if (isRDSR) {
+                                reportIcon = QIcon(":/icons/RDSR.png");
+                                // If RDSR icon not found, create a distinctive fallback
+                                if (reportIcon.isNull()) {
+                                    QPixmap rdrsPixmap(16, 16);
+                                    rdrsPixmap.fill(QColor(255, 100, 100)); // Red background for RDSR
+                                    QPainter painter(&rdrsPixmap);
+                                    painter.setPen(QPen(Qt::white, 2));
+                                    painter.setFont(QFont("Arial", 8, QFont::Bold));
+                                    painter.drawText(QRect(0, 0, 16, 16), Qt::AlignCenter, "RD");
+                                    reportIcon = QIcon(rdrsPixmap);
+                                }
+                            } else {
+                                reportIcon = QIcon(":/icons/List.png");
+                                // Create fallback for general SR if needed
+                                if (reportIcon.isNull()) {
+                                    QPixmap srPixmap(16, 16);
+                                    srPixmap.fill(QColor(100, 100, 200)); // Blue background for SR
+                                    QPainter painter(&srPixmap);
+                                    painter.setPen(QPen(Qt::white, 2));
+                                    painter.setFont(QFont("Arial", 8, QFont::Bold));
+                                    painter.drawText(QRect(0, 0, 16, 16), Qt::AlignCenter, "SR");
+                                    reportIcon = QIcon(srPixmap);
+                                }
+                            }
+                            item->setIcon(0, reportIcon);
+                            
+                            QString logMsg = isRDSR ? QString("Set RDSR icon for %1").arg(fileName) : 
+                                                      QString("Set SR icon for %1").arg(fileName);
+                            logMessage("DEBUG", logMsg);
                         } else {
                             // Get frame count from cached DICOM data instead of re-reading file
                             DicomImageInfo imageInfo = m_dicomReader->getImageInfoForFile(fileName);
@@ -7013,13 +6804,27 @@ void DicomViewer::updateSpecificTreeItemProgress(const QString& fileName, int pr
                             
                             logMessage("DEBUG", QString("[ICON SELECTION] File: %1 Cached Frames: %2 Path: %3").arg(fileName).arg(cachedFrameCount).arg(imageInfo.filePath));
                             
+                            QIcon imageIcon;
                             if (cachedFrameCount > 1) {
-                                item->setIcon(0, QIcon(":/icons/AcquisitionHeader.png"));
+                                imageIcon = QIcon(":/icons/AcquisitionHeader.png");
+                                if (imageIcon.isNull()) {
+                                    // Fallback for multiframe
+                                    QPixmap fallback(16, 16);
+                                    fallback.fill(QColor(200, 100, 100));
+                                    imageIcon = QIcon(fallback);
+                                }
                                 logMessage("DEBUG", QString("Set multiframe icon for %1 (%2 frames)").arg(fileName).arg(cachedFrameCount));
                             } else {
-                                item->setIcon(0, QIcon(":/icons/Camera.png"));
+                                imageIcon = QIcon(":/icons/Camera.png");
+                                if (imageIcon.isNull()) {
+                                    // Fallback for single frame
+                                    QPixmap fallback(16, 16);
+                                    fallback.fill(QColor(100, 200, 100));
+                                    imageIcon = QIcon(fallback);
+                                }
                                 logMessage("DEBUG", QString("Set single frame icon for %1").arg(fileName));
                             }
+                            item->setIcon(0, imageIcon);
                         }
                         
                         logMessage("DEBUG", QString("File completed, restored original text: %1").arg(originalText));
@@ -7382,25 +7187,15 @@ void DicomViewer::onAllThumbnailsGenerated()
 {
     logMessage("DEBUG", "Thumbnail generation completed! Showing thumbnail panel.");
     
-    // Stop file availability monitoring since thumbnails are complete
-    stopFileAvailabilityMonitoring();
-    
     // Clean up thread pool tasks (they auto-delete)
     // Mark thumbnails as complete
     m_allThumbnailsComplete = true;
     
-    // Only show the thumbnail panel if NO DVD/copy operations are in progress
-    // Wait until all operations (detection, copy, and thumbnails) are complete
-    if (!m_copyInProgress && !m_dvdDetectionInProgress) {
-        // Show the thumbnail panel after all thumbnails are generated and no copy operations
+    // Show the thumbnail panel - thumbnails are ready regardless of other operations
+    if (m_thumbnailPanel) {
         m_thumbnailPanel->setVisible(true);
         updateStatusBar("Ready", -1);
-        logMessage("DEBUG", "Thumbnail panel shown - no operations in progress and all thumbnails generated");
-        logMessage("DEBUG", "[THUMBNAIL PANEL] *** PANEL NOW VISIBLE *** - All thumbnails generated and no copy operations");
-    } else {
-        logMessage("DEBUG", QString("Thumbnail generation complete, but operations still in progress - panel stays hidden: copyInProgress: %1, dvdDetectionInProgress: %2")
-                 .arg(m_copyInProgress).arg(m_dvdDetectionInProgress));
-        logMessage("DEBUG", "[THUMBNAIL PANEL] Generation complete but panel stays hidden - operations in progress");
+        logMessage("DEBUG", "[THUMBNAIL PANEL] *** PANEL NOW VISIBLE *** - All thumbnails generated");
     }
     
     // Apply pending tree selection if any
@@ -7449,41 +7244,26 @@ void DicomViewer::onAllThumbnailsGenerated()
 
 void DicomViewer::onFileReadyForThumbnail(const QString& fileName)
 {
-    // Mark file as ready for access in legacy system
-    QMutexLocker fileLocker(&m_fileStatesMutex);
-    m_fileReadyStates[fileName] = true;
-    fileLocker.unlock(); // Release lock before other operations
-    
     logMessage("DEBUG", QString("[FILE READY] File ready for thumbnail generation: %1").arg(fileName));
     
-    // IMPORTANT: Update the proper FileState system
     // Construct the full file path using PathNormalizer for consistent path handling
     QString fullPath = PathNormalizer::constructFilePath(m_localDestPath, fileName);
     logMessage(LOG_DEBUG, QString("PathNormalizer: Constructed file path for ready notification: %1").arg(fullPath));
     if (QFile::exists(fullPath)) {
-        // Update file state to Available - this is key for display monitor
-        setFileState(fullPath, FileState::Available);
-        logMessage("DEBUG", QString("[FILE READY] File state updated to Available: %1").arg(fullPath));
+        logMessage("DEBUG", QString("[FILE READY] File exists and ready: %1").arg(fullPath));
         
         // IMMEDIATE FIRST IMAGE DISPLAY: Check if this is the very first available image
-        // This triggers when the tree icon changes from waiting to image/run icon
-        if (!m_firstImageFound && m_currentlyDisplayedPath.isEmpty() && !isDisplayingAnything()) {
+        if (!isDisplayingAnything()) {
             // This is the first file to become available - display it immediately!
-            m_firstImageFound = true;
-            logMessage("DEBUG", QString("[FILE READY] *** FIRST AVAILABLE FILE *** - Triggering immediate display: %1").arg(fullPath));
+            logMessage(LOG_DEBUG, QString("[FILE READY] *** FIRST AVAILABLE FILE *** - Triggering immediate display: %1").arg(fullPath));
             
-            // Stop the FirstImageMonitor since we found and are displaying the first image
-            stopFirstImageMonitor();
+            // First image found and displayed immediately
             
             // Request immediate display of first available image
             requestDisplay(fullPath);
         } else {
             // Log for timing analysis
-            static bool firstFileLogged = false;
-            if (!firstFileLogged) {
-                firstFileLogged = true;
-                logMessage("DEBUG", QString("[FILE READY] First file available but conditions not met - FirstImageFound: %1, DisplayPath: %2, IsDisplaying: %3").arg(m_firstImageFound).arg(m_currentlyDisplayedPath).arg(isDisplayingAnything()));
-            }
+            logMessage(LOG_DEBUG, QString("[FILE READY] First file available but already displaying something"));
         }
         
         // NOTE: FirstImageMonitor is backup - immediate display above should handle first image
@@ -7492,8 +7272,8 @@ void DicomViewer::onFileReadyForThumbnail(const QString& fileName)
         /*
         // OLD APPROACH - DISABLED: Too many triggers for large DVD copies
         // Check if this is the first available file and no image is displayed yet
-        if (m_currentlyDisplayedPath.isEmpty() && !isDisplayingAnything()) {
-            logMessage("DEBUG", QString("[FILE READY] First available file - requesting immediate display: %1").arg(fullPath));
+        if (!isDisplayingAnything()) {
+            logMessage(LOG_DEBUG, QString("[FILE READY] First available file - requesting immediate display: %1").arg(fullPath));
             // Request immediate display of first available image
             requestDisplay(fullPath);
         }
@@ -7528,72 +7308,7 @@ void DicomViewer::onFileReadyForThumbnail(const QString& fileName)
     m_pendingSelections = remainingSelections;
 }
 
-// ========== STATE MANAGEMENT IMPLEMENTATION ==========
-
-FileState DicomViewer::getFileState(const QString& filePath) const
-{
-    QMutexLocker locker(&m_fileStatesMutex);
-    
-    // Normalize path case to ensure consistent lookups
-    QString normalizedPath = PathNormalizer::normalize(filePath);
-    return m_fileStates.value(normalizedPath, FileState::NotReady);
-}
-
-void DicomViewer::setFileState(const QString& filePath, FileState state)
-{
-    QMutexLocker locker(&m_fileStatesMutex);
-    
-    // Normalize path case to ensure consistent storage
-    QString normalizedPath = PathNormalizer::normalize(filePath);
-    FileState oldState = m_fileStates.value(normalizedPath, FileState::NotReady);
-    if (oldState != state) {
-        m_fileStates[normalizedPath] = state;
-        
-        // ENHANCED LOGGING FOR FILE STATE CHANGES
-        QString stateNames[] = {"NotReady", "Copying", "Available", "DisplayReady"};
-        QString oldStateName = (static_cast<int>(oldState) < 4) ? stateNames[static_cast<int>(oldState)] : "Unknown";
-        QString newStateName = (static_cast<int>(state) < 4) ? stateNames[static_cast<int>(state)] : "Unknown";
-        
-        logMessage("INFO", QString("[FILE STATE CHANGE] %1").arg(QFileInfo(filePath).fileName()));
-        logMessage("INFO", QString("[FILE STATE CHANGE] Path: %1").arg(filePath));
-        logMessage("INFO", QString("[FILE STATE CHANGE] %1 (%2) -> %3 (%4)")
-                 .arg(oldStateName).arg(static_cast<int>(oldState))
-                 .arg(newStateName).arg(static_cast<int>(state)));
-        logMessage("DEBUG", QString("[FILE STATE] %1: %2 -> %3")
-                 .arg(filePath).arg(static_cast<int>(oldState)).arg(static_cast<int>(state)));
-        
-        // Handle DisplayReady state transitions
-        if (state == FileState::DisplayReady) {
-            // Clear previous DisplayReady file
-            if (!m_currentDisplayReadyFile.isEmpty() && m_currentDisplayReadyFile != filePath) {
-                m_fileStates[m_currentDisplayReadyFile] = FileState::Available;
-                logMessage("DEBUG", QString("[FILE STATE] Cleared DisplayReady: %1").arg(m_currentDisplayReadyFile));
-            }
-            m_currentDisplayReadyFile = filePath;
-        } else if (m_currentDisplayReadyFile == filePath) {
-            m_currentDisplayReadyFile.clear();
-        }
-        
-        // NEW: Check if all files are now Available and trigger thumbnails if so
-        if (state == FileState::Available) {
-            // Use a timer to defer the check to avoid blocking and allow batch updates
-            QTimer::singleShot(10, this, [this]() {
-                checkAllFilesAvailableAndTriggerThumbnails();
-            });
-        }
-    }
-}
-
-bool DicomViewer::isFileAvailable(const QString& filePath) const
-{
-    FileState state = getFileState(filePath);
-    return state == FileState::Available || state == FileState::DisplayReady;
-}
-
-bool DicomViewer::isFileDisplayReady(const QString& filePath) const
-{
-    return getFileState(filePath) == FileState::DisplayReady;
-}
+// ========== THUMBNAIL STATE MANAGEMENT IMPLEMENTATION ==========
 
 ThumbnailState DicomViewer::getThumbnailState(const QString& filePath) const
 {
@@ -7636,140 +7351,75 @@ bool DicomViewer::areAllThumbnailsReady() const
     return true;
 }
 
-void DicomViewer::checkAllFilesAvailableAndTriggerThumbnails()
-{
-    // Skip if monitoring is not active
-    if (!m_fileAvailabilityMonitoringActive) {
-        logMessage("DEBUG", "[FILE AVAILABILITY MONITOR] Monitoring not active - skipping check");
-        return;
-    }
-    
-    logMessage("DEBUG", "[FILE AVAILABILITY MONITOR] Checking if all files are now Available...");
-    
-    // Skip if thumbnail generation is already active
-    if (m_thumbnailGenerationActive) {
-        logMessage("DEBUG", "[FILE AVAILABILITY MONITOR] Thumbnail generation already active - skipping check");
-        return;
-    }
-    
-    // Skip if thumbnails are already complete
-    if (m_allThumbnailsComplete) {
-        logMessage("DEBUG", "[FILE AVAILABILITY MONITOR] Thumbnails already complete - skipping check");
-        return;
-    }
-    
-    if (areAllFilesComplete()) {
-        logMessage("INFO", "[FILE AVAILABILITY MONITOR] *** ALL FILES NOW AVAILABLE *** - Triggering thumbnail generation");
-        
-        // Update status and trigger thumbnail generation
-        updateStatusBar("All files available - Generating thumbnails...", 0);
-        
-        // Trigger thumbnail generation through the existing panel update mechanism
-        updateThumbnailPanel();
-    } else {
-        // Log current availability status for debugging
-        QMutexLocker locker(&m_fileStatesMutex);
-        int totalFiles = getTotalFileCount();
-        int availableFiles = 0;
-        for (auto it = m_fileStates.begin(); it != m_fileStates.end(); ++it) {
-            if (it.value() == FileState::Available || it.value() == FileState::DisplayReady) {
-                availableFiles++;
-            }
-        }
-        logMessage("DEBUG", QString("[FILE AVAILABILITY MONITOR] Still waiting: %1/%2 files available")
-                 .arg(availableFiles).arg(totalFiles));
-    }
-}
-
-void DicomViewer::startFileAvailabilityMonitoring()
-{
-    logMessage("INFO", "[FILE AVAILABILITY MONITOR] *** STARTING file availability monitoring ***");
-    m_fileAvailabilityMonitoringActive = true;
-}
-
-void DicomViewer::stopFileAvailabilityMonitoring()
-{
-    logMessage("INFO", "[FILE AVAILABILITY MONITOR] *** STOPPING file availability monitoring ***");
-    m_fileAvailabilityMonitoringActive = false;
-}
-
 bool DicomViewer::areAllFilesComplete() const
 {
-    QMutexLocker locker(&m_fileStatesMutex);
-    
-    int totalFiles = getTotalFileCount();
-    int completeFiles = 0;
-    
-    // Count files that are Available or DisplayReady
-    for (auto it = m_fileStates.begin(); it != m_fileStates.end(); ++it) {
-        FileState state = it.value();
-        if (state == FileState::Available || state == FileState::DisplayReady) {
-            completeFiles++;
-        }
+    if (!m_dicomTree) {
+        return false;
     }
     
-    bool allComplete = (completeFiles >= totalFiles) && (totalFiles > 0);
-    logMessage("DEBUG", QString("[FILE COMPLETION] %1 of %2 files complete (All complete: %3)")
-             .arg(completeFiles).arg(totalFiles).arg(allComplete ? "YES" : "NO"));
+    // Simple approach: just count files that exist on disk
+    int totalFiles = 0;
+    int existingFiles = 0;
+    
+    QTreeWidgetItemIterator it(m_dicomTree);
+    while (*it) {
+        QTreeWidgetItem* item = *it;
+        QVariantList userData = item->data(0, Qt::UserRole).toList();
+        
+        if (userData.size() >= 2) {
+            QString itemType = userData[0].toString();
+            QString filePath = userData[1].toString();
+            
+            if (itemType == "image" || itemType == "report") {
+                totalFiles++;
+                if (QFile::exists(filePath)) {
+                    existingFiles++;
+                }
+            }
+        }
+        ++it;
+    }
+    
+    bool allComplete = (existingFiles >= totalFiles) && (totalFiles > 0);
+    logMessage("DEBUG", QString("[FILE COMPLETION] %1 of %2 files exist (All complete: %3)")
+             .arg(existingFiles).arg(totalFiles).arg(allComplete ? "YES" : "NO"));
     
     return allComplete;
-}
-
-int DicomViewer::getTotalFileCount() const
-{
-    if (!m_dicomReader) {
-        logMessage("DEBUG", "[TOTAL FILE COUNT] DicomReader not available");
-        return 0;
-    }
-    
-    // Get total file count from the DicomReader
-    int totalCount = m_dicomReader->getTotalImages();
-    logMessage("DEBUG", QString("[TOTAL FILE COUNT] Total files from DicomReader: %1").arg(totalCount));
-    
-    return totalCount;
 }
 
 // ========== SELECTION GUARD IMPLEMENTATION ==========
 
 bool DicomViewer::beginSelection(const QString& filePath)
 {
-    QMutexLocker locker(&m_selectionMutex);
-    
-    if (m_selectionInProgress) {
-        logMessage("DEBUG", QString("[SELECTION GUARD] Selection already in progress - ignoring %1").arg(filePath));
-        return false;
-    }
-    
-    // Check for DisplayReady optimization
-    FileState currentState = getFileState(filePath);
-    if (currentState == FileState::DisplayReady && m_currentDisplayReadyFile == filePath) {
-        logMessage("DEBUG", QString("[DISPLAY READY] File already displayed and ready - ignoring %1").arg(filePath));
-        return false;
-    }
+    // Simplified selection guard without complex mutex logic
     
     // Check for duplicate selection
     if (m_lastSelectedFilePath == filePath) {
-        logMessage("DEBUG", QString("[DUPLICATE] Same file selected again - ignoring %1").arg(filePath));
+        logMessage(LOG_DEBUG, QString("[DUPLICATE] Same file selected again - ignoring %1").arg(filePath));
         return false;
     }
     
-    m_selectionInProgress = true;
+    // Simple file existence check
+    if (!QFile::exists(filePath)) {
+        logMessage(LOG_DEBUG, QString("[SELECTION GUARD] File does not exist yet - ignoring %1").arg(filePath));
+        return false;
+    }
+    
     m_lastSelectedFilePath = filePath;
-    logMessage("DEBUG", QString("[SELECTION GUARD] Beginning selection for: %1").arg(filePath));
+    logMessage(LOG_DEBUG, QString("[SELECTION GUARD] Beginning selection for: %1").arg(filePath));
     return true;
 }
 
 void DicomViewer::endSelection()
 {
-    QMutexLocker locker(&m_selectionMutex);
-    m_selectionInProgress = false;
-    logMessage("DEBUG", "[SELECTION GUARD] Selection completed");
+    // Simplified selection end - no mutex needed
+    logMessage(LOG_DEBUG, "[SELECTION GUARD] Selection completed");
 }
 
 bool DicomViewer::isSelectionInProgress() const
 {
-    QMutexLocker locker(&m_selectionMutex);
-    return m_selectionInProgress;
+    // Simplified approach - check if we have a current selection
+    return !m_lastSelectedFilePath.isEmpty();
 }
 
 void DicomViewer::autoSelectFirstAvailableImage()
@@ -7787,9 +7437,9 @@ void DicomViewer::autoSelectFirstAvailableImage()
             QVariantList userData = item->data(0, Qt::UserRole).toList();
             if (userData.size() >= 2) {
                 QString filePath = userData[1].toString();
-                FileState state = getFileState(filePath);
                 
-                if (state == FileState::Available) {
+                // Check if file exists instead of using state system
+                if (QFile::exists(filePath)) {
                     logMessage("DEBUG", QString("[AUTO SELECT] Selecting first available image: %1").arg(filePath));
                     
                     // Use Qt's selection mechanism instead of direct function call
@@ -7844,226 +7494,67 @@ void DicomViewer::synchronizeThumbnailSelection(const QString& filePath)
     }
 }
 
-void DicomViewer::initializeFileStatesFromTree()
-{
-    if (!m_dicomTree) {
-        return;
-    }
-    
-    logMessage("DEBUG", "[FILE STATE INIT] Initializing file states from tree...");
-    
-    // Iterate through all tree items and mark existing files as Available
-    QTreeWidgetItemIterator it(m_dicomTree);
-    int availableCount = 0;
-    
-    while (*it) {
-        QTreeWidgetItem* item = *it;
-        QVariantList userData = item->data(0, Qt::UserRole).toList();
-        
-        if (userData.size() >= 2) {
-            QString itemType = userData[0].toString();
-            QString filePath = userData[1].toString();
-            
-            if (itemType == "image" || itemType == "report") {
-                // Check current state first - preserve existing Available states
-                FileState currentState = getFileState(filePath);
-                QFileInfo fileInfo(filePath);
-                
-                if (fileInfo.exists() && fileInfo.isReadable()) {
-                    // Only update to Available if not already Available (preserve dynamic tracking)
-                    if (currentState != FileState::Available && currentState != FileState::DisplayReady) {
-                        setFileState(filePath, FileState::Available);
-                        setThumbnailState(filePath, ThumbnailState::Queued); // Ready for thumbnail generation
-                        availableCount++;
-                        logMessage("DEBUG", QString("[FILE STATE INIT] Marked as Available: %1").arg(filePath));
-                    } else {
-                        logMessage("DEBUG", QString("[FILE STATE INIT] Preserved existing state (%1): %2").arg(static_cast<int>(currentState)).arg(filePath));
-                        if (currentState == FileState::Available) availableCount++;
-                    }
-                } else {
-                    // NEVER downgrade Available or DisplayReady files - preserve copy progress
-                    if (currentState == FileState::NotReady) {
-                        setFileState(filePath, FileState::NotReady);
-                        logMessage("DEBUG", QString("[FILE STATE INIT] File not accessible: %1").arg(filePath));
-                    } else {
-                        logMessage("DEBUG", QString("[FILE STATE INIT] Preserving existing state (%1) for file that appears missing: %2").arg(static_cast<int>(currentState)).arg(filePath));
-                    }
-                }
-            }
-        }
-        
-        ++it;
-    }
-    
-    logMessage("DEBUG", QString("[FILE STATE INIT] Initialized %1 files as Available").arg(availableCount));
-}
-
 // ========== DISPLAY MONITOR SYSTEM ==========
 
 void DicomViewer::initializeDisplayMonitor()
 {
-    logMessage("DEBUG", "[DISPLAY MONITOR] Initializing display monitor system...");
+    logMessage(LOG_DEBUG, "[DISPLAY MONITOR] Initializing event-based display monitor system...");
     
-    // Create the display monitor timer
-    m_displayMonitor = new QTimer(this);
-    m_displayMonitor->setSingleShot(false);
-    m_displayMonitor->setInterval(1000); // Check every 1 second
+    // No timer needed - using event-based approach via updateTreeIconForFile()
+    // First image selection happens automatically when tree icons are updated
     
-    // Connect timer to monitor function
-    connect(m_displayMonitor, &QTimer::timeout, this, &DicomViewer::checkAndUpdateDisplay);
-    
-    m_displayMonitorActive = false;
-    m_currentlyDisplayedPath.clear();
-    m_requestedDisplayPath.clear();
-    
-    logMessage("DEBUG", "[DISPLAY MONITOR] Display monitor initialized");
+    logMessage(LOG_DEBUG, "[DISPLAY MONITOR] Event-based display monitor initialized");
 }
 
 void DicomViewer::startDisplayMonitor()
 {
-    if (m_displayMonitor && !m_displayMonitor->isActive()) {
-        m_displayMonitorActive = true;
-        m_displayMonitor->start();
-        logMessage("DEBUG", "[DISPLAY MONITOR] Display monitor started");
-    }
+    // Simplified approach - no complex display monitor needed
+    logMessage(LOG_DEBUG, "[DISPLAY MONITOR] Simplified display monitor - no timer needed");
 }
 
 void DicomViewer::stopDisplayMonitor()
 {
-    if (m_displayMonitor && m_displayMonitor->isActive()) {
-        m_displayMonitor->stop();
-        m_displayMonitorActive = false;
-        logMessage("DEBUG", "[DISPLAY MONITOR] Display monitor stopped");
-    }
+    // Simplified approach - no complex display monitor needed
+    logMessage(LOG_DEBUG, "[DISPLAY MONITOR] Simplified display monitor - no timer to stop");
 }
 
 void DicomViewer::requestDisplay(const QString& filePath)
 {
-    QMutexLocker locker(&m_displayRequestMutex);
-    
-    if (m_requestedDisplayPath == filePath) {
-        logMessage("DEBUG", QString("[DISPLAY MONITOR] Same display request - ignoring: %1").arg(filePath));
-        return;
-    }
-    
-    m_requestedDisplayPath = filePath;
-    logMessage("DEBUG", QString("[DISPLAY MONITOR] Display requested: %1").arg(filePath));
-    
-    // Start monitor if not already running
-    if (!m_displayMonitor->isActive()) {
-        startDisplayMonitor();
-    }
+    // Convert to canonical path for actual file access
+    QString canonicalPath = getCanonicalPath(filePath);
+    loadDicomImage(canonicalPath);
 }
 
 void DicomViewer::checkAndUpdateDisplay()
 {
-    QMutexLocker locker(&m_displayRequestMutex);
-    
-    if (!m_displayMonitorActive) {
-        return;
-    }
-    
-    // Check if we have a specific display request
-    if (!m_requestedDisplayPath.isEmpty()) {
-        // Validate the requested file state
-        FileState fileState = getFileState(m_requestedDisplayPath);
-        
-        if (fileState == FileState::Available || fileState == FileState::DisplayReady) {
-            if (m_currentlyDisplayedPath != m_requestedDisplayPath) {
-                logMessage("DEBUG", QString("[DISPLAY MONITOR] Displaying requested image: %1").arg(m_requestedDisplayPath));
-                
-                // Release mutex before calling loadDicomImage to prevent deadlock
-                locker.unlock();
-                
-                // Actually load the image
-                loadDicomImage(m_requestedDisplayPath);
-                
-                // Relock and update state
-                locker.relock();
-                m_currentlyDisplayedPath = m_requestedDisplayPath;
-                setFileState(m_requestedDisplayPath, FileState::DisplayReady);
-                
-                // Clear the request since it's fulfilled
-                m_requestedDisplayPath.clear();
-                
-                logMessage("DEBUG", QString("[DISPLAY MONITOR] Display completed: %1").arg(m_currentlyDisplayedPath));
-                
-                // Start file availability monitoring after first successful display
-                // This delays thumbnail generation until first image is shown
-                if (!m_fileAvailabilityMonitoringActive) {
-                    logMessage("DEBUG", "[DISPLAY MONITOR] Starting file availability monitoring after first image display");
-                    startFileAvailabilityMonitoring();
-                    // Trigger immediate check since all files might already be available
-                    QTimer::singleShot(50, this, [this]() {
-                        checkAllFilesAvailableAndTriggerThumbnails();
-                    });
-                }
-            } else {
-                // Already displaying this image
-                m_requestedDisplayPath.clear();
-                logMessage("DEBUG", "[DISPLAY MONITOR] Already displaying requested image");
-            }
-        } else {
-            logMessage("DEBUG", QString("[DISPLAY MONITOR] Requested file not available yet: %1 State: %2").arg(m_requestedDisplayPath).arg(static_cast<int>(fileState)));
-        }
-        return;
-    }
-    
-    // No specific request - check if we need to display something automatically
-    if (isDisplayingAnything()) {
-        return; // Already displaying something
-    }
-    
-    // Nothing displayed - find first available image
+    // Simplified display check without complex monitoring
     if (!m_dicomTree) {
         return;
     }
     
-    QTreeWidgetItemIterator it(m_dicomTree);
-    while (*it) {
-        QTreeWidgetItem* item = *it;
-        QVariantList userData = item->data(0, Qt::UserRole).toList();
-        
-        if (userData.size() >= 2 && userData[0].toString() == "image") {
-            QString filePath = userData[1].toString();
-            FileState state = getFileState(filePath);
+    // Simple check for first available image if nothing is displayed
+    if (!isDisplayingAnything()) {
+        QTreeWidgetItemIterator it(m_dicomTree);
+        while (*it) {
+            QTreeWidgetItem* item = *it;
+            QVariantList userData = item->data(0, Qt::UserRole).toList();
             
-            if (state == FileState::Available) {
-                logMessage("DEBUG", QString("[DISPLAY MONITOR] Auto-displaying first available image: %1").arg(filePath));
-                
-                // Release mutex before calling loadDicomImage
-                locker.unlock();
-                
-                // Load the image
-                loadDicomImage(filePath);
-                
-                // Update tree selection to match
-                m_dicomTree->setCurrentItem(item);
-                synchronizeThumbnailSelection(filePath);
-                
-                // Relock and update state
-                locker.relock();
-                m_currentlyDisplayedPath = filePath;
-                setFileState(filePath, FileState::DisplayReady);
-                
-                logMessage("DEBUG", QString("[DISPLAY MONITOR] Auto-display completed: %1").arg(filePath));
-                return;
+            if (userData.size() >= 2 && userData[0].toString() == "image") {
+                QString filePath = userData[1].toString();
+                if (QFile::exists(filePath)) {
+                    loadDicomImage(filePath);
+                    m_dicomTree->setCurrentItem(item);
+                    return;
+                }
             }
+            ++it;
         }
-        ++it;
     }
-    
-    logMessage("DEBUG", "[DISPLAY MONITOR] No available images found for auto-display");
 }
 
 bool DicomViewer::isDisplayingAnything() const
 {
-    // Check if we have a valid image displayed
-    if (!m_currentlyDisplayedPath.isEmpty()) {
-        return true;
-    }
-    
-    // Also check if the main image widget is showing something meaningful
+    // Simple check for displayed content
     if (m_mainStack && m_mainStack->currentWidget() == m_imageWidget) {
         if (m_pixmapItem && !m_pixmapItem->pixmap().isNull()) {
             return true;
@@ -8075,137 +7566,142 @@ bool DicomViewer::isDisplayingAnything() const
 
 void DicomViewer::clearCurrentDisplay()
 {
-    QMutexLocker locker(&m_displayRequestMutex);
-    m_currentlyDisplayedPath.clear();
-    logMessage("DEBUG", "[DISPLAY MONITOR] Current display cleared");
+    // Simplified: No complex state tracking needed
 }
 
-void DicomViewer::startFirstImageMonitor()
+// Timer-based monitoring removed - using event-based approach in updateTreeIconForFile()
+
+
+
+// ========== SIMPLIFIED DESIGN HELPER FUNCTIONS ==========
+
+QString DicomViewer::getCanonicalPath(const QString& originalPath) const
 {
-    if (m_firstImageFound || (m_firstImageMonitor && m_firstImageMonitor->isActive())) {
-        return; // Already found or monitoring
-    }
+    QString fileName = QFileInfo(originalPath).fileName();
+    return QDir(m_localDestPath).absoluteFilePath(fileName);
+}
+
+QString DicomViewer::getItemPath(QTreeWidgetItem* item) const
+{
+    if (!item) return QString();
     
-    logMessage("DEBUG", "[FIRST IMAGE MONITOR] Starting first image monitoring timer");
+    QVariantList userData = item->data(0, Qt::UserRole).toList();
+    return (userData.size() >= 2) ? userData[1].toString() : QString();
+}
+
+void DicomViewer::updateTreeIconForFile(QTreeWidgetItem* item)
+{
+    if (!item) return;
     
-    // Create timer in main thread
-    if (!m_firstImageMonitor) {
-        m_firstImageMonitor = new QTimer(this);
-        m_firstImageMonitor->setInterval(150); // Check every 150ms
-        m_firstImageMonitor->setSingleShot(false);
+    QString filePath = getCanonicalPath(getItemPath(item));
+    if (QFile::exists(filePath)) {
+        // Change from loading icon to image/run icon
+        item->setIcon(0, getIconForFile(filePath));
         
-        // Connect timer to checking function
-        connect(m_firstImageMonitor, &QTimer::timeout, this, &DicomViewer::checkForFirstAvailableImage);
-    }
-    
-    // Do an immediate check before starting the timer
-    logMessage("DEBUG", "[FIRST IMAGE MONITOR] Performing immediate initial check");
-    checkForFirstAvailableImage();
-    
-    // Start the timer only if we haven't found the first image yet
-    if (!m_firstImageFound) {
-        m_firstImageMonitor->start();
-        logMessage("DEBUG", "[FIRST IMAGE MONITOR] Timer started");
-    }
-}
-
-void DicomViewer::stopFirstImageMonitor()
-{
-    if (m_firstImageMonitor && m_firstImageMonitor->isActive()) {
-        logMessage("DEBUG", "[FIRST IMAGE MONITOR] Stopping first image monitoring timer");
-        m_firstImageMonitor->stop();
+        // EVENT-BASED FIRST IMAGE SELECTION: If this is the first available image
+        // and no image is currently displayed, select it automatically
+        static bool firstImageSelected = false;
+        if (!firstImageSelected && !isDisplayingAnything()) {
+            firstImageSelected = true;
+            logMessage("DEBUG", QString("[FIRST IMAGE EVENT] Auto-selecting first available image: %1").arg(QFileInfo(filePath).fileName()));
+            
+            // Use Qt's selection mechanism to respect user interaction guards
+            m_dicomTree->setCurrentItem(item);
+            
+            // Set our tracking flag as well
+            m_firstImageAutoSelected = true;
+        }
     }
 }
 
-void DicomViewer::checkForFirstAvailableImage()
+void DicomViewer::updateAllTreeIcons()
 {
-    if (m_firstImageFound || !m_dicomTree) {
-        return;
-    }
+    if (!m_dicomTree) return;
     
-    // Check if any image is currently being displayed
-    if (isDisplayingAnything()) {
-        m_firstImageFound = true;
-        stopFirstImageMonitor();
-        logMessage("DEBUG", "[FIRST IMAGE MONITOR] Image already displaying - stopping monitor");
-        return;
-    }
+    QTreeWidgetItem* currentItem = m_dicomTree->currentItem();
+    m_dicomTree->blockSignals(true);
     
-    // Log current state for debugging timing
-    static int checkCount = 0;
-    checkCount++;
-    if (checkCount % 10 == 1) { // Log every 1.5 seconds to avoid spam
-        logMessage("DEBUG", QString("[FIRST IMAGE MONITOR] Check #%1 - looking for first available image...").arg(checkCount));
-    }
-    
-    // Look for the first available image in the tree
     QTreeWidgetItemIterator it(m_dicomTree);
     while (*it) {
-        QTreeWidgetItem* item = *it;
-        QVariantList userData = item->data(0, Qt::UserRole).toList();
-        
-        if (userData.size() >= 2 && userData[0].toString() == "image") {
-            QString filePath = userData[1].toString();
-            
-            // Check file state with both original and normalized paths (like tree click handler)
-            FileState originalState = FileState::NotReady;
-            {
-                QMutexLocker locker(&m_fileStatesMutex);
-                originalState = m_fileStates.value(filePath, FileState::NotReady);
-            }
-            
-            FileState normalizedState = getFileState(filePath); // This normalizes internally
-            
-            // Use the path that has a valid file state
-            FileState effectiveState = originalState;
-            QString effectivePath = filePath;
-            
-            // CRITICAL: In non-DVD mode, files exist at original path, not normalized path
-            // Check file existence to determine which path to use
-            bool originalExists = QFile::exists(filePath);
-            QString normalizedPath = PathNormalizer::normalize(filePath);
-            bool normalizedExists = QFile::exists(normalizedPath);
-            
-            if (originalExists && (originalState == FileState::Available || originalState == FileState::DisplayReady)) {
-                // Best case: Original path exists and has valid state
-                effectivePath = filePath;
-                effectiveState = originalState;
-            } else if (originalExists && originalState == FileState::NotReady && 
-                       (normalizedState == FileState::Available || normalizedState == FileState::DisplayReady)) {
-                // Non-DVD mode: File exists at original path but state stored under normalized path
-                effectivePath = filePath;  // Use original path where file exists
-                effectiveState = normalizedState;  // But use normalized state for validation
-            } else if (normalizedExists && (normalizedState == FileState::Available || normalizedState == FileState::DisplayReady)) {
-                // DVD mode: File exists at normalized path
-                effectivePath = normalizedPath;
-                effectiveState = normalizedState;
-            } else if (originalExists) {
-                // Fallback: Use original path if it exists, regardless of state
-                effectivePath = filePath;
-                effectiveState = originalState;
-            } else {
-                // Final fallback: Use normalized path
-                effectivePath = normalizedPath;
-                effectiveState = normalizedState;
-            }
-            
-            if (checkCount % 10 == 1) { // Detailed logging every 1.5 seconds
-                logMessage("DEBUG", QString("[FIRST IMAGE MONITOR] Checking file: %1 - Original State: %2, Normalized State: %3").arg(filePath).arg(static_cast<int>(originalState)).arg(static_cast<int>(normalizedState)));
-            }
-            
-            if (effectiveState == FileState::Available) {
-                m_firstImageFound = true;
-                stopFirstImageMonitor();
-                
-                logMessage("DEBUG", QString("[FIRST IMAGE MONITOR] Found first available image after %1 checks: %2").arg(checkCount).arg(effectivePath));
-                
-                // Request display of the first available image
-                requestDisplay(effectivePath);
-                return;
-            }
-        }
+        updateTreeIconForFile(*it);
         ++it;
     }
+    
+    m_dicomTree->blockSignals(false);
+    m_dicomTree->setCurrentItem(currentItem); // Preserve selection
+}
+
+QIcon DicomViewer::getIconForFile(const QString& filePath) const
+{
+    // Get filename from path
+    QString fileName = QFileInfo(filePath).fileName();
+    
+    // Check if it's a report first (by displayName in cached data)
+    if (m_dicomReader) {
+        DicomImageInfo imageInfo = m_dicomReader->getImageInfoForFile(fileName);
+        if (!imageInfo.filePath.isEmpty()) {
+            // Check if this is a report by display name
+            if (imageInfo.displayName.contains("RDSR", Qt::CaseInsensitive) || 
+                imageInfo.displayName.contains("Radiation Dose Report", Qt::CaseInsensitive)) {
+                // This is specifically an RDSR (Radiation Dose Structured Report)
+                QIcon rdrsIcon(":/icons/RDSR.png");
+                if (rdrsIcon.isNull()) {
+                    // Create distinctive RDSR fallback icon
+                    QPixmap rdrsPixmap(16, 16);
+                    rdrsPixmap.fill(QColor(255, 100, 100)); // Red background for RDSR
+                    QPainter painter(&rdrsPixmap);
+                    painter.setPen(QPen(Qt::white, 2));
+                    painter.setFont(QFont("Arial", 8, QFont::Bold));
+                    painter.drawText(QRect(0, 0, 16, 16), Qt::AlignCenter, "RD");
+                    rdrsIcon = QIcon(rdrsPixmap);
+                }
+                return rdrsIcon;
+            } else if (imageInfo.displayName.contains("SR DOC", Qt::CaseInsensitive) || 
+                       imageInfo.displayName.contains("REPORT", Qt::CaseInsensitive)) {
+                // This is a general Structured Report
+                QIcon reportIcon(":/icons/List.png");
+                if (reportIcon.isNull()) {
+                    // Create fallback for general SR
+                    QPixmap srPixmap(16, 16);
+                    srPixmap.fill(QColor(100, 100, 200)); // Blue background for SR
+                    QPainter painter(&srPixmap);
+                    painter.setPen(QPen(Qt::white, 2));
+                    painter.setFont(QFont("Arial", 8, QFont::Bold));
+                    painter.drawText(QRect(0, 0, 16, 16), Qt::AlignCenter, "SR");
+                    reportIcon = QIcon(srPixmap);
+                }
+                return reportIcon;
+            }
+            
+            // For images, check frame count
+            if (imageInfo.frameCount > 1) {
+                QIcon multiIcon(":/icons/AcquisitionHeader.png");
+                if (multiIcon.isNull()) {
+                    QPixmap fallback(16, 16);
+                    fallback.fill(QColor(200, 100, 100));
+                    return QIcon(fallback);
+                }
+                return multiIcon;
+            } else {
+                QIcon singleIcon(":/icons/Camera.png");
+                if (singleIcon.isNull()) {
+                    QPixmap fallback(16, 16);
+                    fallback.fill(QColor(100, 200, 100));
+                    return QIcon(fallback);
+                }
+                return singleIcon;
+            }
+        }
+    }
+    
+    // Default fallback icon
+    QIcon defaultIcon(":/icons/Camera.png");
+    if (defaultIcon.isNull()) {
+        QPixmap fallback(16, 16);
+        fallback.fill(QColor(128, 128, 128));
+        return QIcon(fallback);
+    }
+    return defaultIcon;
 }
 
 

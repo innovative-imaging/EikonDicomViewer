@@ -28,5 +28,6 @@
         <file>icons/Camera.png</file>
         <file>icons/Loading.png</file>
         <file>icons/AcquisitionHeader.png</file>
+        <file>icons/RDSR.png</file>
     </qresource>
 </RCC>

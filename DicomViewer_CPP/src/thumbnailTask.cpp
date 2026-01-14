@@ -38,10 +38,8 @@ void ThumbnailTask::run()
         
         // Check file readiness before processing
         {
-            QMutexLocker fileLocker(&m_viewer->m_fileStatesMutex);
-            QString filename = fileInfo.fileName();
-            if (m_viewer->m_copyInProgress && !m_viewer->m_fileReadyStates.value(filename, false)) {
-                logMessage("DEBUG", QString("Skipping file not ready: %1").arg(filename));
+            if (m_viewer->m_copyInProgress && !QFile::exists(m_filePath)) {
+                logMessage("DEBUG", QString("Skipping file not ready: %1").arg(fileInfo.fileName()));
                 emit taskCompleted(m_filePath, QPixmap(), "1");
                 return;
             }

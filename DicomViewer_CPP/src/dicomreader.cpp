@@ -209,9 +209,17 @@ void DicomReader::populateTreeWidget(QTreeWidget* treeWidget)
                     QTreeWidgetItem* imageItem = new QTreeWidgetItem(QStringList() << displayName);
                     
                     // Set UserRole data based on content type
-                    // Only check display name from DICOMDIR parsing - don't check individual files
+                    // Check if this is a Structured Report (SR) or RDSR file
+                    bool isReport = false;
                     if (!image.displayName.isEmpty() && image.displayName.startsWith("SR DOC")) {
-                        // This is a Structured Report document - mark as "report" type
+                        isReport = true;
+                    } else if (image.fileExists) {
+                        // Also check if this is an RDSR file by SOP Class UID
+                        isReport = isRDSRFile(image.filePath);
+                    }
+                    
+                    if (isReport) {
+                        // This is a Structured Report document or RDSR - mark as "report" type
                         imageItem->setData(0, Qt::UserRole, QVariantList() << "report" << image.filePath);
                     } else {
                         // This is an actual image - mark as "image" type
@@ -232,10 +240,17 @@ void DicomReader::populateTreeWidget(QTreeWidget* treeWidget)
                                      .arg(image.frameCount > 1 ? "multiframe image" : "DICOM image");
                         }
                         imageItem->setForeground(0, QColor(180, 180, 180)); // Gray out text
-                    } else if (!image.displayName.isEmpty() && image.displayName.startsWith("SR DOC")) {
-                        // This is a Structured Report document that exists
-                        iconName = "List.png"; // Use document/list icon for SR
-                        tooltip = "Structured Report (SR) Document";
+                    } else if (isReport) {
+                        // Check if this is specifically an RDSR (Radiation Dose Structured Report)
+                        bool isRDSR = isRDSRFile(image.filePath);
+                        if (isRDSR) {
+                            iconName = "RDSR.png"; // Special icon for RDSR
+                            tooltip = "Radiation Dose Structured Report (RDSR)";
+                        } else {
+                            // This is a regular Structured Report document that exists
+                            iconName = "List.png"; // Use document/list icon for SR
+                            tooltip = "Structured Report (SR) Document";
+                        }
                     } else if (image.frameCount > 1) {
                         iconName = "AcquisitionHeader.png";
                         tooltip = QString("Multiframe DICOM image - %1 frames").arg(image.frameCount);
@@ -595,7 +610,18 @@ bool DicomReader::parseWithDcmtk(const QString& dicomdirPath)
                                             atoi(instanceNumberStr.c_str()) : seriesInstanceCount;
                                         docInfo.frameCount = 1;
                                         docInfo.fileExists = QFile::exists(expectedFilePath);
-                                        docInfo.displayName = QString("%1 %2").arg(recordTypeStr).arg(seriesInstanceCount);
+                                        
+                                        // Set display name based on record type, with special handling for RDSR
+                                        if (recordTypeStr == "SR DOC" && QFile::exists(expectedFilePath)) {
+                                            // Check if this is specifically an RDSR file
+                                            if (isRDSRFile(expectedFilePath)) {
+                                                docInfo.displayName = QString("RDSR %1").arg(seriesInstanceCount);
+                                            } else {
+                                                docInfo.displayName = QString("%1 %2").arg(recordTypeStr).arg(seriesInstanceCount);
+                                            }
+                                        } else {
+                                            docInfo.displayName = QString("%1 %2").arg(recordTypeStr).arg(seriesInstanceCount);
+                                        }
                                         
                                         seriesInfo.images.append(docInfo);
                                         m_totalImages++;
@@ -645,7 +671,18 @@ bool DicomReader::parseWithDcmtk(const QString& dicomdirPath)
                                         atoi(instanceNumberStr.c_str()) : seriesInstanceCount;
                                     docInfo.frameCount = 1;
                                     docInfo.fileExists = QFile::exists(fullPath);
-                                    docInfo.displayName = QString("%1 %2").arg(recordTypeStr).arg(seriesInstanceCount);
+                                    
+                                    // Set display name based on record type, with special handling for RDSR
+                                    if (recordTypeStr == "SR DOC" && QFile::exists(fullPath)) {
+                                        // Check if this is specifically an RDSR file
+                                        if (isRDSRFile(fullPath)) {
+                                            docInfo.displayName = QString("RDSR %1").arg(seriesInstanceCount);
+                                        } else {
+                                            docInfo.displayName = QString("%1 %2").arg(recordTypeStr).arg(seriesInstanceCount);
+                                        }
+                                    } else {
+                                        docInfo.displayName = QString("%1 %2").arg(recordTypeStr).arg(seriesInstanceCount);
+                                    }
                                     
                                     seriesInfo.images.append(docInfo);
                                     m_totalImages++;
@@ -932,7 +969,12 @@ void DicomReader::updateImageDisplayNameFromFile(DicomImageInfo& image)
 {
     if (isStructuredReport(image.filePath)) {
         if (!image.displayName.startsWith("SR DOC")) {
-            image.displayName = QString("SR DOC - X-Ray Radiation Dose Report");
+            // Check if this is specifically an RDSR
+            if (isRDSRFile(image.filePath)) {
+                image.displayName = QString("RDSR - Radiation Dose Report");
+            } else {
+                image.displayName = QString("SR DOC - Structured Report");
+            }
         }
     } else {
         // For regular images, try to get better metadata if available
@@ -941,6 +983,43 @@ void DicomReader::updateImageDisplayNameFromFile(DicomImageInfo& image)
             image.displayName = pathInfo.fileName();
         }
     }
+}
+
+bool DicomReader::isRDSRFile(const QString& filePath) const
+{
+    if (!QFile::exists(filePath)) {
+        return false;
+    }
+
+#ifdef HAVE_DCMTK
+    try {
+        DcmFileFormat fileformat;
+        OFCondition result = fileformat.loadFile(filePath.toLocal8Bit().constData());
+        
+        if (result.bad()) {
+            return false;
+        }
+        
+        DcmDataset* dataset = fileformat.getDataset();
+        if (!dataset) {
+            return false;
+        }
+        
+        // Check SOP Class UID specifically for X-Ray Radiation Dose SR
+        OFString sopClassUID;
+        if (dataset->findAndGetOFString(DCM_SOPClassUID, sopClassUID).good()) {
+            // X-Ray Radiation Dose SR SOP Class UID
+            if (sopClassUID == "1.2.840.10008.5.1.4.1.1.88.67") {
+                LOG_DEBUG(QString("File identified as RDSR: %1").arg(filePath));
+                return true;
+            }
+        }
+    } catch (...) {
+        LOG_ERROR(QString("Exception while checking RDSR file: %1").arg(filePath));
+        return false;
+    }
+#endif
+    return false;
 }
 
 DicomImageInfo DicomReader::getImageInfoForFile(const QString& filePath) const

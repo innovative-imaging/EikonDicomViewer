@@ -183,15 +183,7 @@ public:
     }
 };
 
-// ========== FILE STATE MANAGEMENT ==========
-
-// File state tracking for DVD copy and availability
-enum class FileState {
-    NotReady,    // File not yet copied or doesn't exist
-    Copying,     // File being copied from DVD
-    Available,   // File copied and exists, ready for loading
-    DisplayReady // File loaded and currently displayed (optimization state)
-};
+// ========== THUMBNAIL STATE MANAGEMENT ==========
 
 // Thumbnail generation state tracking
 enum class ThumbnailState {
@@ -437,32 +429,22 @@ private:
     double calculateFitToWindowZoom();
     QString findFfmpegExecutable();  // Find ffmpeg.exe in local directory or DVD drive
     
-    // State management methods
-    FileState getFileState(const QString& filePath) const;
-    void setFileState(const QString& filePath, FileState state);
-    bool isFileAvailable(const QString& filePath) const;
-    bool isFileDisplayReady(const QString& filePath) const;
-    
+    // Thumbnail state management methods
     ThumbnailState getThumbnailState(const QString& filePath) const;
     void setThumbnailState(const QString& filePath, ThumbnailState state);
     bool areAllThumbnailsReady() const;
     
-    // File completion tracking for delayed thumbnails
+    // Simple file completion checking
     bool areAllFilesComplete() const;
-    int getTotalFileCount() const;
-    void checkAllFilesAvailableAndTriggerThumbnails(); // NEW: Monitor file availability
-    void startFileAvailabilityMonitoring();  // Start monitoring
-    void stopFileAvailabilityMonitoring();   // Stop monitoring
     
     // Selection guard methods
     bool beginSelection(const QString& filePath);
     void endSelection();
     bool isSelectionInProgress() const;
     
-    // State-based navigation methods
+    // Navigation methods
     void autoSelectFirstAvailableImage();
     void synchronizeThumbnailSelection(const QString& filePath);
-    void initializeFileStatesFromTree(); // Initialize file states for existing files
     
     // Display Monitor System
     void initializeDisplayMonitor();
@@ -471,10 +453,9 @@ private:
     void requestDisplay(const QString& filePath);
     void checkAndUpdateDisplay(); // Called by monitor timer
     bool isDisplayingAnything() const;
-    void startFirstImageMonitor();
-    void stopFirstImageMonitor();
-    void checkForFirstAvailableImage();
     void clearCurrentDisplay();
+    
+    // Event-based first image selection (no timer functions needed)
     
     // FFmpeg copy methods
     void checkInitialFfmpegAvailability();
@@ -524,38 +505,17 @@ private:
     // Race condition prevention members
     QMutex m_dcmtkAccessMutex;           // Protect all DCMTK operations
     QAtomicInt m_thumbnailGenerationActive;  // 0=idle, 1=active
-    QMap<QString, bool> m_fileReadyStates;   // Track copy completion
-    mutable QMutex m_fileStatesMutex;                // Protect file states map
+
     QQueue<QString> m_pendingSelections;     // Queue user clicks during generation
     QMutex m_pendingSelectionsMutex;         // Protect pending queue
     
-    // State-based architecture members
-    QMap<QString, FileState> m_fileStates;           // Track file copy/availability states
+    // Thumbnail state tracking
     QMap<QString, ThumbnailState> m_thumbnailStates; // Track thumbnail generation states
-    mutable QMutex m_thumbnailStatesMutex;                   // Protect thumbnail states access
-    
-    // Selection guards to prevent recursion
-    bool m_selectionInProgress;                      // Guard against recursive onTreeItemSelected
-    mutable QMutex m_selectionMutex;                        // Protect selection state
-    QString m_currentDisplayReadyFile;               // Track which file is currently DisplayReady
+    mutable QMutex m_thumbnailStatesMutex;           // Protect thumbnail states access
     
     // Application state coordination
     bool m_thumbnailPanelProcessingActive;          // Guard against thumbnail panel updates
     QString m_lastSelectedFilePath;                 // Track last user selection for deduplication
-    
-    // Display Monitor System
-    QTimer* m_displayMonitor;                       // Periodic display monitor
-    QString m_requestedDisplayPath;                 // What user wants to display
-    QString m_currentlyDisplayedPath;               // What is actually displayed
-    QMutex m_displayRequestMutex;                   // Protect display request state
-    bool m_displayMonitorActive;                    // Monitor enabled/disabled
-    
-    // FirstImageMonitor for efficient first image auto-display
-    QTimer* m_firstImageMonitor;                    // Timer for checking first available image
-    
-    // File Availability Monitoring
-    bool m_fileAvailabilityMonitoringActive;        // Whether file monitoring is active
-    bool m_firstImageFound;                         // Flag to prevent multiple triggers
     
     // Main content area
     QStackedWidget* m_mainStack;
@@ -698,6 +658,14 @@ private:
     QByteArray flipHorizontallyInternal(const QByteArray& data);
     QByteArray invertPixelDataInternal(const QByteArray& data);
     void convertToDisplayFormat(const QByteArray& transformedData);
+    
+    // Simplified design helper functions
+    QString getCanonicalPath(const QString& originalPath) const;
+    QString getItemPath(QTreeWidgetItem* item) const;
+    void updateTreeIconForFile(QTreeWidgetItem* item);
+    void updateAllTreeIcons();
+    void checkFirstAvailableImage();
+    QIcon getIconForFile(const QString& filePath) const;
     void applyWindowingToTransformedData(const QByteArray& data, double center, double width);
     void applyTransformationsToAllCachedFrames();
     
